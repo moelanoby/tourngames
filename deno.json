@@ -1,22 +1,47 @@
 {
- "tasks": {
- "dev": "deno run -A --unstable-kv --watch server/mod.ts",
- "start": "deno run -A --unstable-kv server/mod.ts",
- "check": "deno check server/*.ts",
- "test": "deno test -A --unstable-kv --no-check"
- },
- "compilerOptions": {
- "strict": true,
- "noUncheckedIndexedAccess": true,
- "noImplicitOverride": true,
- "noFallthroughCasesInSwitch": true,
- "noPropertyAccessFromIndexSignature": false,
- "exactOptionalPropertyTypes": false
- },
- "lint": {
- "rules": {
- "tags": ["recommended"],
- "include": ["no-explicit-any", "no-unused-vars"]
- }
- }
+  "tasks": {
+    "dev": "deno run -A --unstable-kv --watch server/mod.ts",
+    "start": "deno run -A --unstable-kv server/mod.ts",
+    "check": "deno check server/*.ts",
+    "test": "deno test -A --unstable-kv --no-check"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": false,
+    "exactOptionalPropertyTypes": false
+  },
+  "lint": {
+    "rules": {
+      "tags": [
+        "recommended"
+      ],
+      "include": [
+        "no-explicit-any",
+        "no-unused-vars"
+      ]
+    }
+  },
+  "deploy": {
+    "project": "tourngames",
+    "entrypoint": "server/mod.ts",
+    "include": [
+      "server/**/*",
+      "public/**/*",
+      "games/**/*",
+      "sdk/**/*",
+      "deno.json",
+      "deno.lock"
+    ],
+    "exclude": [
+      ".git/**/*",
+      ".github/**/*",
+      "node_modules/**/*",
+      "security/**/*",
+      "*.md",
+      "*.txt"
+    ]
+  }
 }

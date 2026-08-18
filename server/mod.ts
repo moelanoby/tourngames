@@ -99,6 +99,7 @@ const MIME_TYPES: Record<string, string> = {
 // ─── Static File Serving ─────────────────────────────────────────────────────
 
 function resolveStaticPath(urlPath: string): string | null {
+  console.log("[DEBUG] resolveStaticPath:", urlPath);
  let p = urlPath.replace(/^\/+/, "");
  if (p.includes("..") || p.includes("\\")) return null;
  if (p === "" || p === "index.html") return "public/index.html";
@@ -111,7 +112,9 @@ function resolveStaticPath(urlPath: string): string | null {
 }
 
 async function serveStaticFile(urlPath: string): Promise<Response> {
+  console.log("[DEBUG] serveStaticFile called with:", urlPath);
  const filePath = resolveStaticPath(urlPath);
+  console.log("[DEBUG] resolveStaticPath returned:", filePath);
  if (!filePath) {
  return applySecurityHeaders(new Response("Forbidden", { status: 403 }));
  }
@@ -577,6 +580,7 @@ async function handleGameConfigApi(): Promise<Response> {
 // ─── HTTP API Router ─────────────────────────────────────────────────────────
 
 async function handleApi(req: Request, urlPath: string): Promise<Response> {
+  console.log("[DEBUG] handleApi:", urlPath);
  const [resource, ...rest] = urlPath.split("/");
  const action = rest.join("/");
 
@@ -617,6 +621,7 @@ console.log(`[Startup] Purged ${purgedCount} lobbies.`);
 Deno.serve(async (req: Request) => {
  const url = new URL(req.url);
  const path = url.pathname;
+  console.log("[DEBUG] Request:", req.method, path, "from", req.headers.get("origin") || "unknown");
 
  // ── CORS preflight ──
  if (req.method === "OPTIONS") {

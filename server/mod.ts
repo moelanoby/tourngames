@@ -122,9 +122,11 @@ async function serveStaticFile(urlPath: string): Promise<Response> {
  }
  try {
  const content = await Deno.readTextFile(filePath);
- const ext = "." + (filePath.split(".").pop() || "");
- const mime = MIME_TYPES[ext] || "application/octet-stream";
- // Never cache HTML, JS, or CSS ensures users always get the latest code.
+  // Extract extension from the actual filename (handle file:// URLs and query strings)
+  const urlPathForExt = urlPath.split("?")[0]; // strip query string
+  const extMatch = urlPathForExt.match(/\.[a-zA-Z0-9]+$/);
+  const ext = extMatch ? "." + extMatch[1].toLowerCase() : "";
+  const mime = MIME_TYPES[ext] || "application/octet-stream";
  // Only cache binary assets (images, fonts) that don't change.
  const cacheControl = (ext === ".html" || ext === ".js" || ext === ".css" || ext === ".mjs")
  ? "no-cache, no-store, must-revalidate"

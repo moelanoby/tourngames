@@ -98,17 +98,19 @@ const MIME_TYPES: Record<string, string> = {
 
 // ─── Static File Serving ─────────────────────────────────────────────────────
 
+// Get the directory of the current module (server/mod.ts)
+const __dirname = new URL(".", import.meta.url).pathname;
 function resolveStaticPath(urlPath: string): string | null {
   console.log("[DEBUG] resolveStaticPath:", urlPath);
- let p = urlPath.replace(/^\/+/, "");
- if (p.includes("..") || p.includes("\\")) return null;
- if (p === "" || p === "index.html") return "public/index.html";
- if (p.startsWith("public/")) p = p.slice("public/".length);
- if (p.startsWith("ui/")) return "public/ui/" + p.slice("ui/".length);
- if (p.startsWith("games/")) return p;
- if (p.startsWith("assets/")) return "public/assets/" + p.slice("assets/".length);
- if (p.startsWith("sdk/")) return "sdk/" + p.slice("sdk/".length);
- return "public/" + p;
+  let p = urlPath.replace(/^\/+/, "");
+  if (p.includes("..") || p.includes("\\")) return null;
+  if (p === "" || p === "index.html") return new URL("public/index.html", import.meta.url).pathname;
+  if (p.startsWith("public/")) p = p.slice("public/".length);
+  if (p.startsWith("ui/")) return new URL("public/ui/" + p.slice("ui/".length), import.meta.url).pathname;
+  if (p.startsWith("games/")) return new URL(p, import.meta.url).pathname;
+  if (p.startsWith("assets/")) return new URL("public/assets/" + p.slice("assets/".length), import.meta.url).pathname;
+  if (p.startsWith("sdk/")) return new URL("sdk/" + p.slice("sdk/".length), import.meta.url).pathname;
+  return new URL("public/" + p, import.meta.url).pathname;
 }
 
 async function serveStaticFile(urlPath: string): Promise<Response> {

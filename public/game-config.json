@@ -1,0 +1,8 @@
+{
+ "gameId": "chess-royale",
+ "gameModulePath": "/games/chess-royale/mod.js",
+ "gameName": "Chess Royale",
+ "maxPlayers": 20,
+ "canvasWidth": 600,
+ "canvasHeight": 650
+}

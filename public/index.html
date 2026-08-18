@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+ <meta charset="UTF-8" />
+ <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+ <meta name="description" content="TournGames multiplayer browser game tournaments. Play, watch, repeat." />
+ <title>TournGames</title>
+
+ <link rel="preconnect" href="https://fonts.googleapis.com">
+ <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+ <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+ <link rel="stylesheet" href="/styles.css">
+ <link rel="modulepreload" href="/games/chess-royale/mod.js">
+</head>
+<body>
+
+ <!-- ─── Navigation ─── -->
+ <nav class="nav">
+ <div class="nav-left">
+ <a href="#/game" class="logo">
+ <span class="logo-mark"></span>
+ TournGames
+ </a>
+ <div class="nav-links">
+ <button class="nav-link" data-section="game">Play</button>
+ <button class="nav-link" data-section="lobbies">Lobbies</button>
+ <button class="nav-link" data-section="archive">Archive</button>
+ <button class="nav-link nav-link-admin hidden" data-section="admin">Admin</button>
+ <button class="nav-link" data-section="patreon">Support</button>
+ </div>
+ </div>
+ <div class="nav-right">
+ <span class="player-info" id="player-info" title="Click to change name">Not connected</span>
+ <div class="auth-buttons" id="auth-buttons">
+ <button class="btn btn-ghost btn-sm" id="show-login-btn">Log in</button>
+ <button class="btn btn-primary btn-sm" id="show-register-btn">Sign up</button>
+ </div>
+ <div class="user-menu hidden" id="user-menu">
+ <span class="user-name" id="user-display"></span>
+ <button class="btn btn-ghost btn-sm" id="logout-btn">Log out</button>
+ </div>
+ </div>
+ </nav>
+
+ <main class="main">
+
+ <!-- ═══════════════════════════════════════════════════════════════════
+ GAME SECTION
+ ═══════════════════════════════════════════════════════════════════ -->
+ <section id="section-game" class="section active">
+
+ <!-- Username picker -->
+ <div id="username-screen" class="max-w-md mx-auto">
+ <div class="text-center mb-8">
+ <h1>Welcome</h1>
+ <p class="muted">Pick a name to start playing. You can create an account later to track stats.</p>
+ </div>
+ <div class="card">
+ <div class="form-group">
+ <label class="form-label" for="username-input">Display name</label>
+ <input type="text" id="username-input" maxlength="16" placeholder="your name..." class="input" spellcheck="false" autocomplete="username">
+ </div>
+ <p id="username-error" class="form-error hidden"></p>
+ <button id="set-username-btn" class="btn btn-primary btn-block mt-2">Continue</button>
+ <p class="form-hint text-center mt-3">
+ 3–16 characters · letters, numbers, _ and - only
+ </p>
+ <p class="form-hint text-center mt-2">
+ Want to save your stats? <button id="show-register-from-username" class="btn btn-ghost btn-sm" style="padding: 0; height: auto; display: inline;">Create an account</button>
+ </p>
+ </div>
+ </div>
+
+ <!-- Find match screen -->
+ <div id="find-match-screen" class="hidden">
+ <!-- ═══════════════════════════════════════════════════════════════════
+ ⚠️ AI AGENTS: DO NOT CHANGE THE GAME SYSTEM BELOW.
+ The game name and description are loaded DYNAMICALLY from the
+ server's /api/game-config endpoint, which reads games.config.json
+ to find the current_game, then reads the first comment block from
+ the game module file for the description.
+ To add a new game: create /games/<game-name>/mod.js with a
+ description in the first comment, then set "current_game" in
+ games.config.json. Do NOT hardcode game names in the HTML.
+ ═══════════════════════════════════════════════════════════════════ -->
+ <div class="text-center mb-8">
+ <div class="today-game-label">Today's Game is</div>
+ <h1 id="game-name">Loading...</h1>
+ <p id="game-description" class="muted"></p>
+ </div>
+
+ <div class="flex justify-center gap-3 mb-6 flex-wrap">
+ <button id="find-match-btn" class="btn btn-primary btn-lg">Make a lobby</button>
+ <button id="play-solo-btn" class="btn btn-secondary btn-lg">Solo</button>
+ </div>
+
+ <!-- Available lobbies (shown when making a lobby) -->
+ <div id="quick-lobbies" class="hidden mt-6">
+ <div class="card">
+ <div class="flex items-center justify-between mb-4">
+ <h3 class="card-title">Open lobbies</h3>
+ <button id="quick-create-btn" class="btn btn-primary btn-sm">+ Create new</button>
+ </div>
+ <div id="quick-lobby-list" class="lobby-grid"></div>
+ </div>
+ </div>
+
+ <!-- Lobby waiting -->
+ <div id="lobby-wait" class="hidden mt-8">
+ <div class="card">
+ <div class="card-header">
+ <h3 class="card-title">Waiting for players</h3>
+ <button id="leave-lobby-btn" class="btn btn-ghost btn-sm">Leave</button>
+ </div>
+ <div id="lobby-name-display" class="mono mb-3"></div>
+ <div id="player-list" class="mb-4"></div>
+ <div class="flex items-center justify-between flex-wrap gap-3 mb-4">
+ <button id="start-match-btn" class="btn btn-primary btn-sm hidden">Start match</button>
+ <div class="text-right">
+ <span id="lobby-status" class="text-sm muted">Connecting...</span>
+ <span id="lobby-count" class="mono ml-2"></span>
+ </div>
+ </div>
+ <div class="lobby-invite-section">
+ <p class="form-hint mb-2">Invite friends share this link:</p>
+ <div class="flex gap-2">
+ <input id="lobby-invite-link" type="text" class="input" readonly style="font-size: 12px;">
+ <button id="copy-invite-btn" class="btn btn-secondary btn-sm">Copy</button>
+ </div>
+ <p id="lobby-wait-hint" class="form-hint mt-3"></p>
+ </div>
+ </div>
+ </div>
+ </div>
+
+ <!-- Game screen -->
+ <div id="game-screen" class="hidden">
+ <div class="game-layout">
+ <div class="game-board-wrap" id="game-canvas-wrapper">
+ <canvas id="game-canvas" width="600" height="650" class="game-canvas"></canvas>
+
+ <div id="elimination-overlay" class="elimination-overlay">
+ <div class="elimination-content">
+ <h1 class="elimination-title">Eliminated</h1>
+ <p class="muted mb-6">You can't see the game anymore. Watch to see who wins.</p>
+ <div class="flex justify-center gap-3 flex-wrap">
+ <button id="back-to-lobby-btn" class="btn btn-secondary">Back to lobby</button>
+ <button id="view-replay-btn" class="btn btn-primary hidden">View replay</button>
+ </div>
+ </div>
+ </div>
+ </div>
+
+ <div class="game-sidebar">
+ <div class="game-info card card-compact">
+ <div class="flex items-center justify-between">
+ <div>
+ <div id="chess-turn" class="font-semibold text-md">Waiting...</div>
+ <div id="chess-phase" class="text-sm muted"></div>
+ </div>
+ <div id="chess-timer" class="badge badge-accent" style="font-size: 14px; padding: 4px 10px;">--</div>
+ </div>
+ </div>
+
+ <div class="vote-panel card">
+ <h4 class="card-title mb-3">Proposed Moves</h4>
+ <div id="vote-list">
+ <p class="subtle text-sm">Waiting for game to start...</p>
+ </div>
+ </div>
+
+ <div class="chat-panel card">
+ <div class="chat-tabs">
+ <button class="chat-tab active" id="chat-tab-public">Public</button>
+ <button class="chat-tab" id="chat-tab-team">Team</button>
+ </div>
+ <div id="chat-messages" class="chat-messages"></div>
+ <div class="chat-input-row">
+ <input id="chat-input" type="text" placeholder="Message all players..." maxlength="200" class="input" style="height: 34px; font-size: 13px;">
+ <button id="chat-send-btn" class="btn btn-primary btn-sm">Send</button>
+ </div>
+ </div>
+ </div>
+ </div>
+ </div>
+ </section>
+
+ <!-- ═══════════════════════════════════════════════════════════════════
+ LOBBIES SECTION
+ ═══════════════════════════════════════════════════════════════════ -->
+ <section id="section-lobbies" class="section">
+ <div class="section-header">
+ <div class="flex items-center justify-between flex-wrap gap-3">
+ <div>
+ <h1>Lobbies</h1>
+ <p class="section-subtitle">Browse open lobbies, create your own, or sign up for tournaments.</p>
+ </div>
+ <button id="create-lobby-btn" class="btn btn-primary">+ Create lobby</button>
+ </div>
+ </div>
+
+ <!-- Create lobby form -->
+ <div id="create-lobby-form" class="card hidden mb-6 slide-up">
+ <h3 class="card-title mb-4">Create a lobby</h3>
+ <div class="form-row mb-4">
+ <div class="form-group">
+ <label class="form-label">Lobby name</label>
+ <input type="text" id="create-name" maxlength="60" placeholder="Friday Night Cup" class="input">
+ </div>
+ <div class="form-group">
+ <label class="form-label">Game</label>
+ <select id="create-game" class="select">
+ <option value="chess-royale">Chess Royale</option>
+ </select>
+ </div>
+ </div>
+ <div class="form-row mb-4">
+ <div class="form-group">
+ <label class="form-label">Type</label>
+ <select id="create-type" class="select">
+ <option value="open">Open anyone can join</option>
+ <option value="signup">Signup reserve slots</option>
+ <option value="private">Private invite code</option>
+ </select>
+ </div>
+ <div class="form-row">
+ <div class="form-group">
+ <label class="form-label">Min players</label>
+ <input type="number" id="create-min" min="2" max="10" value="2" class="input">
+ </div>
+ <div class="form-group">
+ <label class="form-label">Max players</label>
+ <input type="number" id="create-max" min="2" max="20" value="10" class="input">
+ </div>
+ </div>
+ </div>
+ <div class="flex gap-2">
+ <button id="confirm-create-lobby" class="btn btn-primary">Create</button>
+ <button id="cancel-create-lobby" class="btn btn-ghost">Cancel</button>
+ </div>
+ </div>
+
+ <!-- Lobby list -->
+ <div id="lobby-browser-list" class="lobby-grid">
+ <div class="text-center subtle" style="padding: 48px;">Loading lobbies...</div>
+ </div>
+
+ <!-- Lobby detail view -->
+ <div id="lobby-detail" class="hidden">
+ <div class="card">
+ <div class="card-header">
+ <div>
+ <h3 id="detail-name" class="card-title"></h3>
+ <p id="detail-meta" class="mono mt-2"></p>
+ </div>
+ <button id="detail-back-btn" class="btn btn-ghost btn-sm">← Back</button>
+ </div>
+
+ <div class="form-row mb-6">
+ <div>
+ <h4 class="mb-3">Players</h4>
+ <div id="detail-players"></div>
+ <div id="detail-join-section" class="mt-4">
+ <button id="detail-join-btn" class="btn btn-primary btn-sm">Join lobby</button>
+ <div id="detail-invite-input" class="hidden mt-3">
+ <label class="form-label">Invite code</label>
+ <div class="flex gap-2">
+ <input type="text" id="detail-invite-code" maxlength="6" placeholder="ABCDEF" class="input" style="text-transform: uppercase;">
+ <button id="detail-join-with-code" class="btn btn-primary btn-sm">Join</button>
+ </div>
+ </div>
+ </div>
+ </div>
+ <div id="detail-signup-section">
+ <h4 class="mb-3">Signups</h4>
+ <div id="detail-signups" class="mb-3"></div>
+ <button id="detail-signup-btn" class="btn btn-secondary btn-sm">Sign up</button>
+ <button id="detail-cancel-signup-btn" class="btn btn-ghost btn-sm hidden">Cancel signup</button>
+ <p id="detail-signup-note" class="form-hint mt-2"></p>
+ </div>
+ </div>
+
+ <div style="border-top: 1px solid var(--border); padding-top: 16px;">
+ <button id="detail-start-match-btn" class="btn btn-primary">Start match</button>
+ <p class="form-hint mt-2">Only the host can start the match.</p>
+ </div>
+ </div>
+ </div>
+ </section>
+
+ <!-- ═══════════════════════════════════════════════════════════════════
+ ARCHIVE SECTION
+ ═══════════════════════════════════════════════════════════════════ -->
+ <section id="section-archive" class="section">
+ <div class="section-header">
+ <h1>Archive</h1>
+ <p class="section-subtitle">Past tournaments. Watch previous games of yours.</p>
+ </div>
+
+ <div id="replay-list" class="lobby-grid mb-8">
+ <div class="text-center subtle" style="padding: 48px;">Loading replays...</div>
+ </div>
+
+ <div id="replay-viewer" class="hidden">
+ <div class="card card-compact mb-4 flex items-center justify-between">
+ <h3 id="replay-title" class="card-title"></h3>
+ <button id="replay-back-btn" class="btn btn-ghost btn-sm">← Back</button>
+ </div>
+ <div class="game-canvas-wrap">
+ <canvas id="replay-canvas" width="800" height="600" class="game-canvas"></canvas>
+ </div>
+ </div>
+ </section>
+
+ <!-- ═══════════════════════════════════════════════════════════════════
+ ADMIN SECTION
+ ═══════════════════════════════════════════════════════════════════ -->
+ <section id="section-admin" class="section section-wide">
+ <div class="section-header">
+ <h1>Admin</h1>
+ <p class="section-subtitle">Manage users, lobbies, and review the audit log.</p>
+ </div>
+
+ <!-- Admin tabs -->
+ <div class="modal-tabs mb-6" style="border-bottom: 1px solid var(--border);">
+ <button class="modal-tab active" data-admin-tab="users">Users</button>
+ <button class="modal-tab" data-admin-tab="lobbies">Lobbies</button>
+ <button class="modal-tab" data-admin-tab="audit">Audit Log</button>
+ </div>
+
+ <!-- Users tab -->
+ <div id="admin-tab-users" class="admin-tab-content">
+ <div class="table-wrap">
+ <table class="table">
+ <thead>
+ <tr>
+ <th>Username</th>
+ <th>Role</th>
+ <th>Status</th>
+ <th>Wins</th>
+ <th>Last login</th>
+ <th>Actions</th>
+ </tr>
+ </thead>
+ <tbody id="admin-users-tbody">
+ <tr><td colspan="6" class="text-center subtle" style="padding: 24px;">Loading...</td></tr>
+ </tbody>
+ </table>
+ </div>
+ </div>
+
+ <!-- Lobbies tab -->
+ <div id="admin-tab-lobbies" class="admin-tab-content hidden">
+ <div class="table-wrap">
+ <table class="table">
+ <thead>
+ <tr>
+ <th>Name</th>
+ <th>Type</th>
+ <th>Status</th>
+ <th>Players</th>
+ <th>Host</th>
+ <th>Actions</th>
+ </tr>
+ </thead>
+ <tbody id="admin-lobbies-tbody">
+ <tr><td colspan="6" class="text-center subtle" style="padding: 24px;">Loading...</td></tr>
+ </tbody>
+ </table>
+ </div>
+ </div>
+
+ <!-- Audit log tab -->
+ <div id="admin-tab-audit" class="admin-tab-content hidden">
+ <div class="table-wrap">
+ <table class="table">
+ <thead>
+ <tr>
+ <th>Time</th>
+ <th>Action</th>
+ <th>Actor</th>
+ <th>Target</th>
+ <th>Details</th>
+ <th>IP</th>
+ </tr>
+ </thead>
+ <tbody id="admin-audit-tbody">
+ <tr><td colspan="6" class="text-center subtle" style="padding: 24px;">Loading...</td></tr>
+ </tbody>
+ </table>
+ </div>
+ </div>
+ </section>
+
+ <!-- ═══════════════════════════════════════════════════════════════════
+ SUPPORT SECTION
+ ═══════════════════════════════════════════════════════════════════ -->
+ <section id="section-patreon" class="section max-w-md">
+ <div class="section-header">
+ <h1>Support</h1>
+ <p class="section-subtitle">No pressure just if you want to :)</p>
+ </div>
+
+ <div class="card">
+ <h3 class="mb-3">Why support?</h3>
+ <p class="muted mb-4">There are no extra benefits for donating. It's all just to support the development of these games. No pressure is going to be made play for free forever.</p>
+ <p class="muted mb-6">Anything helps cover server costs, domains, and the time spent building new games.</p>
+
+ <div class="flex flex-col gap-2 mb-6">
+ <div class="list-item">
+ <div class="flex items-center justify-between" style="gap: 24px;">
+ <span class="font-semibold">silly supporter :3</span>
+ <span class="text-sm muted mono">$1/mo</span>
+ </div>
+ </div>
+ <div class="list-item">
+ <div class="flex items-center justify-between" style="gap: 24px;">
+ <span class="font-semibold">bigger silly supporter :]</span>
+ <span class="text-sm muted mono">$5/mo</span>
+ </div>
+ </div>
+ <div class="list-item">
+ <div class="flex items-center justify-between" style="gap: 24px;">
+ <span class="font-semibold">da biggest silly supporter :O</span>
+ <span class="text-sm muted mono">$20/mo</span>
+ </div>
+ </div>
+ </div>
+
+ <a href="https://patreon.com/sillyveh" target="_blank" rel="noopener" class="btn btn-primary btn-block">Support the silliness</a>
+ </div>
+ </section>
+
+ </main>
+
+ <footer class="footer">
+ <span>TournGames v0.3 Deno + WebRTC</span>
+ </footer>
+
+ <!-- ─── Auth Modal ─── -->
+ <div class="modal-overlay hidden" id="auth-modal">
+ <div class="modal auth-modal">
+ <div class="modal-header">
+ <h3 class="modal-title" id="auth-modal-title">Log in</h3>
+ <button class="modal-close" id="auth-modal-close">×</button>
+ </div>
+
+ <div class="modal-tabs">
+ <button class="modal-tab active" id="auth-tab-login">Log in</button>
+ <button class="modal-tab" id="auth-tab-register">Sign up</button>
+ </div>
+
+ <form id="auth-form">
+ <div class="form-group">
+ <label class="form-label" for="auth-username">Username</label>
+ <input type="text" id="auth-username" maxlength="16" placeholder="your name" class="input" spellcheck="false" autocomplete="username">
+ </div>
+ <div class="form-group">
+ <label class="form-label" for="auth-password">Password</label>
+ <input type="password" id="auth-password" maxlength="128" placeholder="••••••••" class="input" autocomplete="current-password">
+ </div>
+ <p id="auth-error" class="form-error hidden"></p>
+ <button type="submit" id="auth-submit-btn" class="btn btn-primary btn-block mt-2">Log in</button>
+ </form>
+
+ <p class="form-hint text-center mt-4">Accounts track your wins and let you sign up for tournaments.</p>
+ </div>
+ </div>
+
+ <!-- ─── Loading Overlay ─── -->
+ <div class="loading-overlay" id="loading-overlay">
+ <div class="loading-content">
+ <div class="loading-title">Loading</div>
+ <div class="loading-bar-wrap">
+ <div class="loading-bar" id="loading-bar"></div>
+ </div>
+ <p class="loading-text" id="loading-text">loading...</p>
+ </div>
+ </div>
+
+ <!-- ─── Toast Container ─── -->
+ <div class="toast-container" id="toast-container"></div>
+
+ <script type="module" src="/app.js"></script>
+</body>
+</html>

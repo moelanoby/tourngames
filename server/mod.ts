@@ -583,6 +583,10 @@ async function handleApi(req: Request, urlPath: string): Promise<Response> {
   console.log("[DEBUG] handleApi:", urlPath);
  const [resource, ...rest] = urlPath.split("/");
  const action = rest.join("/");
+  // Normalize: strip trailing slash and query string
+  if (action.endsWith("/")) action = action.slice(0, -1);
+  const qIdx = action.indexOf("?");
+  if (qIdx >= 0) action = action.slice(0, qIdx);
 
  if (resource === "auth") return handleAuthApi(req, action);
  if (resource === "csrf") return handleCsrfApi(req);

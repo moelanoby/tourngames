@@ -19,6 +19,24 @@ This folder contains security hardening guides, vulnerability assessments, anti-
 | **Game logic** | Host-authoritative simulation, P2P input voting, match-over reporting, replay integrity |
 | **Infrastructure** | Deno Deploy config, TLS, HSTS, CSP, CORS |
 
+## Document Map
+
+| Document | Primary Focus | Start Here If... |
+|---|---|---|
+| [`VULNERABILITY-ASSESSMENT.md`](./VULNERABILITY-ASSESSMENT.md) | 25 vulnerabilities with exploit scenarios | You want to understand **what** the vulnerabilities are |
+| [`HARDENING-GUIDE.md`](./HARDENING-GUIDE.md) | Step-by-step code fixes for each vulnerability | You want to **fix** vulnerabilities |
+| [`ANTI-CHEAT.md`](./ANTI-CHEAT.md) | Game-specific cheat vectors & mitigations | You care about **game fairness** and P2P security |
+| [`CHECKLIST.md`](./CHECKLIST.md) | Ongoing security operations schedule | You need to **maintain** security post-deployment |
+
+## Vulnerability Summary (All 25)
+
+| Severity | Count | Examples |
+|---|---|---|
+| CRITICAL | 5 | CORS wildcard, WebSocket CSWSH, P2P signaling relay scoping, P2P input forgery, P2P state injection |
+| HIGH | 5 | Match-over from any player, CSP unsafe-inline, weak PBKDF2, host-authoritative no server validation, P2P match-over forgery |
+| MEDIUM | 11 | Non-constant-time invite code, no body limit, no WS connection limit, username XSS (defense), session fixation, P2P mesh abuse, chat spoofing, replay path injection, WS lobby enumeration, session device binding, no host migration |
+| LOW | 4 | User enumeration, static file exposure, predictable seed, no WS IP logging |
+
 ## Threat Model
 
 **Assets to protect:**

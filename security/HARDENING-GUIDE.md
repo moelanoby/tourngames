@@ -472,3 +472,380 @@ Expires: 2026-12-31T23:59:59Z
 4. **KV Consistency:** Deno KV provides eventual consistency across regions. The `purgeAllLobbies` call on startup is important — make sure it works correctly in a multi-region deployment.
 
 5. **Rate limiting state:** The in-memory rate limiter (`rateBuckets` Map) is per-instance. Under Deno Deploy's multi-region deployment, each region has its own in-memory rate limiter. This means an attacker could potentially bypass rate limits by hitting different regions. For stronger rate limiting, consider using Deno KV (persistent across regions) or a service like Cloudflare Workers KV.
+
+
+---
+
+## Additional Hardening Fixes (Part 2)
+
+---
+
+### 16. P2P Input Authentication (Signature Verification)
+
+**Problem:** The host accepts P2P inputs with any `playerId` — no authentication.
+
+**Solution:** Implement HMAC-based input signing. Each peer gets a signing key derived from their session token + server-issued nonce.
+
+**File:** `server/mod.ts` (add to WebSocket upgrade handler) and `public/app.js` (P2P input sending/handling)
+
+**Step 1: Server issues signing keys on WebSocket connect**
+```typescript
+// In mod.ts, after generating playerId in WebSocket handler:
+const signingKey = bufToHex(randomBytes(32));
+connections.set(playerId, { 
+    lobbyId: null, 
+    ws: socket, 
+    userId, 
+    username, 
+    signingKey  // <-- NEW
+});
+```
+
+**Step 2: Client signs inputs before sending**
+```typescript
+// In public/app.js, collectAndSendInput:
+collectAndSendInput() {
+    if (!this.state || !this.state.running || state.isHost) return;
+    // ... existing checks ...
+
+    const input = this.module.getLocalInput(this.keys);
+    if (input && (input.jump || input.action)) {
+        const payload = { 
+            type: "input", 
+            playerId: state.playerId, 
+            input: input,
+            sig: await signInput(input, state.playerId, state.signingKey)  // <-- NEW
+        };
+        if (state.p2pClient) {
+            state.p2pClient.sendToPeer(state.hostId, payload);
+        }
+    }
+}
+
+// Crypto helper (uses Web Crypto API):
+async function signInput(input, playerId, key) {
+    const enc = new TextEncoder();
+    const message = enc.encode(JSON.stringify({ input, playerId }));
+    const cryptoKey = await crypto.subtle.importKey(
+        "raw", hexToBuf(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+    );
+    const signature = await crypto.subtle.sign("HMAC", cryptoKey, message);
+    return bufToHex(signature);
+}
+```
+
+**Step 3: Host verifies signatures before processing**
+```typescript
+// In public/app.js, P2P onMessage handler:
+if (p2p.isHost) {
+    if (msg.type === "input") {
+        if (await verifyInputSignature(msg.input, msg.playerId, msg.sig, connections.get(msg.playerId)?.signingKey)) {
+            gameMgr.pendingInputs[msg.playerId] = msg.input;
+        } else {
+            console.warn("[P2P] Invalid input signature from", msg.playerId);
+        }
+    }
+}
+```
+
+**Note:** This requires sharing the `signingKey` from the server to the client via the `assign-id` WebSocket message. Update `ICE_CONFIG` in `assign-id` to include `signingKey`.
+
+---
+
+### 17. P2P Game-State Validation
+
+**Problem:** Non-host peers accept `game-state` from any peer.
+
+**Solution:** Only accept from host, validate tick monotonicity.
+
+**File:** `public/app.js`, P2P `onMessage` handler
+
+```typescript
+p2p.onMessage = (peerId, msg) => {
+    // ... chat handling ...
+
+    if (!p2p.isHost) {
+        if (msg.type === "game-state") {
+            // Only accept from host
+            if (peerId !== state.hostId) {
+                console.warn("[P2P] Rejected game-state from non-host:", peerId);
+                return;
+            }
+            // Validate tick is not too far in the future
+            if (msg.tick > gameMgr.tick + 2) {
+                console.warn("[P2P] Rejected game-state with suspicious tick:", msg.tick);
+                return;
+            }
+            gameMgr.receiveState(msg.state, msg.tick);
+        }
+        if (msg.type === "match-over") {
+            // Only accept from host
+            if (peerId !== state.hostId) return;
+            gameMgr.receiveMatchOver(msg.winner, msg.winnerName);
+        }
+    }
+    // ... rest ...
+};
+```
+
+---
+
+### 18. P2P Match-Over Validation
+
+**Problem:** Any peer can broadcast `match-over`.
+
+**Solution:** Only accept from host (already covered by fix 17).
+
+---
+
+### 19. Chat Message Authentication
+
+**Problem:** Chat `playerName` and `senderTeam` are forgeable.
+
+**Solution:** Use the lobby roster to verify player identity.
+
+```typescript
+// In public/app.js, P2P onMessage chat handler:
+if (msg.type === "chat") {
+    // Look up real player info from lobby roster
+    const sender = state.players.find(p => p.id === peerId);
+    if (!sender) return; // unknown peer
+
+    // Use verified name and team
+    const verifiedName = sender.name;
+    const verifiedTeam = state.gameState?.data?.playerTeams?.[peerId];
+
+    // For team chat, verify the sender is actually on that team
+    if (msg.channel === "team" && verifiedTeam !== msg.senderTeam) {
+        return; // forged team
+    }
+
+    displayChatMessage(verifiedName, msg.message, msg.channel, verifiedTeam);
+    return;
+}
+```
+
+---
+
+### 20. Replay gameModule Validation
+
+**Problem:** `replay.gameModule` from localStorage can be path-traversed.
+
+**Solution:** Whitelist validation.
+
+```typescript
+// In public/app.js (handleGameStart) and public/ui/archive.js (loadReplay):
+const KNOWN_GAMES = ["chess-royale"]; // populated from /api/game-config or games.config.json
+
+function validateGameModule(gameModule) {
+    return KNOWN_GAMES.includes(gameModule);
+}
+
+// Before import:
+const gameModule = replay.gameModule || "chess-royale";
+if (!validateGameModule(gameModule)) {
+    showToast("Invalid game module in replay", "error");
+    return;
+}
+const gameModulePath = "/games/" + gameModule + "/mod.js";
+```
+
+Also populate `KNOWN_GAMES` from the server's game config:
+```typescript
+// In app.js, after fetching game-config:
+state.knownGames = [gameConfig.gameId]; // e.g., ["chess-royale"]
+```
+
+---
+
+### 21. WebSocket Rate Limiting
+
+**Problem:** WebSocket `list-lobbies` has no rate limit.
+
+**Solution:** Apply same rate limiting as HTTP API.
+
+**File:** `server/signaling.ts`
+
+```typescript
+// At top of file, import rateLimit from security.ts
+import { rateLimit } from "./security.ts";
+
+// In handleWebSocketMessage, before list-lobbies case:
+case "list-lobbies": {
+    const rl = rateLimit(`ws-lobby-list:${ctx.playerId}`, 30, 60 * 1000); // 30/min
+    if (!rl.ok) {
+        safeSend(ws, { type: "error", message: "Too many lobby list requests" });
+        return;
+    }
+    // ... existing handler
+}
+```
+
+Also add rate limiting to other WS messages:
+```typescript
+// create-lobby (already has rateLimitLobbyCreate on HTTP, but WS bypasses it)
+case "create-lobby": {
+    if (ctx.userId) {
+        const rl = rateLimit(`ws-lobby-create:${ctx.userId}`, 10, 60 * 1000);
+        if (!rl.ok) return safeSend(ws, { type: "error", message: rl.message });
+    }
+    // ...
+}
+
+// join-specific (invite code brute-force)
+case "join-specific": {
+    const rl = rateLimit(`ws-invite:${ctx.playerId}`, 5, 60 * 1000);
+    if (!rl.ok) return safeSend(ws, { type: "error", message: "Too many join attempts" });
+    // ...
+}
+```
+
+---
+
+### 22. Session Device Binding
+
+**Problem:** Session tokens work from any IP/browser.
+
+**Solution:** Bind sessions to User-Agent hash; allow IP changes.
+
+**File:** `server/auth.ts`
+
+```typescript
+// In createSession:
+export async function createSession(userId: string, req?: Request): Promise<Session> {
+    // ... existing code ...
+    const uaHash = req ? await hashUserAgent(req.headers.get("user-agent")) : null;
+    const session: Session = {
+        // ... existing fields ...
+        uaHash,  // NEW
+        ip: req ? getClientIp(req) : "unknown",  // NEW (initial IP for reference)
+    };
+    // ...
+}
+
+// On session validation (getSession):
+export async function getSession(token: string, req?: Request): Promise<Session | null> {
+    // ... existing validation ...
+    if (req && res.value.uaHash) {
+        const currentUAHash = await hashUserAgent(req.headers.get("user-agent"));
+        if (res.value.uaHash !== currentUAHash) {
+            await deleteSession(token);
+            return null; // User-Agent changed = potential token theft
+        }
+    }
+    // IP check: warn but don't block (mobile users change IPs)
+    return res.value;
+}
+
+async function hashUserAgent(ua: string | null): Promise<string> {
+    if (!ua) return "";
+    const enc = new TextEncoder();
+    const buf = await crypto.subtle.digest("SHA-256", enc.encode(ua));
+    return bufToHex(buf);
+}
+```
+
+---
+
+### 23. Cryptographic Game Seed
+
+**Problem:** `Math.random()` for seed generation.
+
+**Solution:** Use `crypto.getRandomValues()`.
+
+**File:** `server/lobbies.ts`
+
+```typescript
+function generateSeed(): number {
+    const arr = new Uint32Array(1);
+    crypto.getRandomValues(arr);
+    return arr[0];
+}
+```
+
+---
+
+### 24. Host Migration on Disconnect
+
+**Problem:** No new host when host leaves.
+
+**Solution:** Elect next player as host.
+
+**File:** `server/signaling.ts`, `handleWebSocketClose` / `leaveLobby`
+
+```typescript
+async function leaveLobby(playerId: string): Promise<void> {
+    const info = connections.get(playerId);
+    if (!info?.lobbyId) return;
+    const lobby = await getLobby(info.lobbyId);
+    if (lobby) {
+        const wasHost = lobby.hostId === playerId;
+        await removePlayerFromLobby(lobby, playerId);
+
+        // If host left, elect new host
+        if (wasHost && lobby.players.length > 0) {
+            const newHost = lobby.players[0];
+            lobby.hostId = newHost.id;
+            lobby.hostName = newHost.name;
+            lobby.hostUserId = newHost.userId || null;
+            await updateLobby(lobby);
+
+            // Notify remaining players of new host
+            await broadcastLobbyState(lobby.id, {
+                type: "host-changed",
+                newHostId: newHost.id,
+                newHostName: newHost.name,
+            });
+        }
+        // ... rest of existing leaveLobby
+    }
+    // ...
+}
+```
+
+Also update client-side to handle `host-changed` message.
+
+---
+
+### 25. WebSocket IP Logging
+
+**Problem:** WebSocket connections don't log client IP.
+
+**Solution:** Add IP to ConnectionInfo and log on connect/disconnect.
+
+**File:** `server/signaling.ts`
+
+```typescript
+export interface ConnectionInfo {
+    lobbyId: string | null;
+    ws: WebSocket;
+    userId: string | null;
+    username: string | null;
+    ip: string;  // NEW
+}
+
+// In mod.ts WebSocket upgrade handler:
+const playerId = crypto.randomUUID();
+const clientIp = getClientIp(req);
+connections.set(playerId, { lobbyId: null, ws: socket, userId, username, ip: clientIp });
+
+console.log(`[WS] Player ${playerId} connected from ${clientIp} (user: ${username || "anon"})`);
+
+// In handleWebSocketClose:
+console.log(`[WS] Player ${playerId} disconnected from ${info?.ip}`);
+```
+
+---
+
+## Additional Monitoring Rules
+
+Add to your monitoring/alerting:
+
+| Rule | Trigger | Action |
+|---|---|---|
+| WebSocket connection spike | > 100 new WS connections/min from single IP | Alert, consider IP block |
+| P2P input signature failure rate | > 5% of inputs have invalid signatures | Investigate potential attack |
+| Chat impersonation attempts | Same IP sending chat as multiple different names | Alert |
+| Replay gameModule validation failures | Any attempt to load unknown game module | Alert, potential path traversal attempt |
+| Host disconnect frequency | Host disconnects during active matches > 3x/hour | Investigate potential griefing |
+| Match-over from non-host | Any non-host peer sending match-over | Immediate alert, potential cheat |

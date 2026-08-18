@@ -89,7 +89,7 @@ This document outlines the inherent cheat vectors in this architecture, what mit
 
 **Threat:** Any player (not just the host) can send `{ type: "match-over", winner: "<player-id>" }` to the server. The server records wins/losses based on the report.
 
-**Status:** **UNPATCHED — see [`VULNERABILITY-ASSESSMENT.md`](./VULNERABILITY-ASSESSMENT.md#medium-session-tokens-not-rotated-on-login) and [`HARDENING-GUIDE.md`](./HARDENING-GUIDE.md#4-validate-match-over-reports).**
+**Status:** **UNPATCHED — see [`VULNERABILITY-ASSESSMENT.md`](./VULNERABILITY-ASSESSMENT.md#high-match-over-accepted-from-any-player) and [`HARDENING-GUIDE.md`](./HARDENING-GUIDE.md#4-validate-match-over-reports).**
 
 **Impact:** Win-loss record manipulation. A non-host player can credit wins to themselves or damage another player's record.
 
@@ -101,7 +101,7 @@ This document outlines the inherent cheat vectors in this architecture, what mit
 
 **Threat:** Any connected player can send WebRTC signaling messages (offer/answer/ICE) to any other connected player, even from different lobbies.
 
-**Status:** **UNPATCHED — see [`VARDENING-GUIDE.md`](./HARDENING-GUIDE.md#3-scope-websocket-signaling-to-lobbies).**
+**Status:** **UNPATCHED — see [`HARDENING-GUIDE.md`](./HARDENING-GUIDE.md#3-scope-websocket-signaling-to-lobbies).**
 
 **Impact:** WebRTC IP address leakage between players in different lobbies. Cross-lobby harassment. Potential for a malicious peer to infiltrate a game's P2P mesh.
 

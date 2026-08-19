@@ -1,0 +1,63 @@
+# Firebase Setup Guide for TournGames
+
+## Step 1: Enable Authentication
+1. Go to https://console.firebase.google.com/
+2. Select project: tourngames-silly
+3. Left menu → Authentication → Sign-in method tab
+4. Enable "Email/Password" provider
+
+## Step 2: Enable Realtime Database
+1. Left menu → Realtime Database → Create database
+2. Choose "Start in test mode" (allows all read/write for development)
+3. Select location closest to your audience
+
+## Step 3: Replace Database Rules
+Copy the JSON below and paste it into the Firebase Console:
+
+1. Left menu → Realtime Database → Data tab (or Rules tab)
+2. Click "Rules" tab
+3. Replace all content with the JSON below
+4. Click "Publish"
+
+=== Database Rules JSON (copy everything between the lines below) ===
+
+{
+  "rules": {
+    "lobbies": {
+      ".read": true,
+      ".write": true
+    },
+    "signaling": {
+      ".read": true,
+      ".write": true
+    },
+    "presence": {
+      ".read": true,
+      ".write": true
+    },
+    "games": {
+      ".read": true,
+      ".write": true
+    },
+    "chat": {
+      ".read": true,
+      ".write": true
+    }
+  }
+}
+
+=== End of Database Rules ===
+
+## Step 4: Add Authorized Domains
+1. Project Settings → General → Your apps → Web app
+2. Under "Authorized domains", add:
+   - sillyveh.github.io
+   - localhost
+
+## Step 5: Enable GitHub Pages
+1. Go to https://github.com/sillyveh/tourngames
+2. Settings → Pages → Build and deployment
+3. Source: GitHub Action
+
+## Done!
+Visit: https://sillyveh.github.io/tourngames/

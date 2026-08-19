@@ -1148,12 +1148,16 @@ function handleFindMatchClick() {
 async function fetchQuickLobbies() {
  const list = document.getElementById("quick-lobby-list");
  if (!list) return;
- try {
-  // Use Firebase lobby list instead of server API
-  const lobbies = knownLobbies || [];
-  renderQuickLobbies(lobbies);
- console.warn("Failed to fetch lobbies:", e);
- }
+async function fetchQuickLobbies() {
+  const list = document.getElementById("quick-lobby-list");
+  if (!list) return;
+  try {
+    // Use Firebase lobby list instead of server API
+    const lobbies = knownLobbies || [];
+    renderQuickLobbies(lobbies);
+  } catch (e) {
+    console.warn("Failed to render lobbies:", e);
+  }
 }
 
 function renderQuickLobbies(lobbyList) {

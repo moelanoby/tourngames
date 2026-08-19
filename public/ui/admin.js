@@ -38,6 +38,9 @@ export function init(opts = {}) {
  dom.tabButtons.forEach(btn => {
  btn.addEventListener("click", () => switchTab(btn.getAttribute("data-admin-tab")));
  });
+  } catch (e) {
+    console.warn("[Admin] Failed to initialize:", e);
+  }
 }
 
 function switchTab(tab) {

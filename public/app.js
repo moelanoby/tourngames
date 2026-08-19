@@ -776,7 +776,7 @@ class GameManager {
 
  async loadGameModule(gameModulePath) {
  showLoading("Loading game module...");
- const mod = await import(gameModulePath);
+ const mod = await import("./" + gameModulePath);
  this.module = mod.default || mod;
  return this.module;
  }

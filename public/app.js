@@ -18,6 +18,7 @@
  */
 
 import * as auth from "/ui/auth.js";
+import * as fb from "/ui/firebase.js";
 import * as lobbies from "/ui/lobbies.js";
 import * as admin from "/ui/admin.js";
 import {
@@ -1148,10 +1149,9 @@ async function fetchQuickLobbies() {
  const list = document.getElementById("quick-lobby-list");
  if (!list) return;
  try {
- const res = await fetch("/api/lobbies", { credentials: "include" });
- const data = await res.json();
- renderQuickLobbies(data.lobbies || []);
- } catch (e) {
+  // Use Firebase lobby list instead of server API
+  const lobbies = knownLobbies || [];
+  renderQuickLobbies(lobbies);
  console.warn("Failed to fetch lobbies:", e);
  }
 }
@@ -2066,14 +2066,7 @@ async function main() {
 
  // Fetch CSRF token (will be set if logged in)
  try {
- const meRes = await fetch("/api/auth/me", { credentials: "include" });
- const meData = await meRes.json();
- if (meData.csrfToken) {
- state.csrfToken = meData.csrfToken;
- }
- } catch (e) {
- console.warn("Failed to fetch CSRF token:", e);
- }
+  // Firebase auth handles authentication - no CSRF needed
 
  // Initialize player name from localStorage
  initPlayer();
@@ -2099,7 +2092,7 @@ async function main() {
  // Load game config
  let gameConfig;
  try {
- const configRes = await fetch("/api/game-config");
+ const configRes = await fetch("/game-config.json");
  gameConfig = await configRes.json();
  } catch (e) {
  console.error("Failed to load game config:", e);

@@ -17,15 +17,15 @@
  * - Signups: reserve slots in signup-type lobbies
  */
 
-import * as auth from "/ui/auth.js";
-import * as fb from "/ui/firebase.js";
-import * as lobbies from "/ui/lobbies.js";
-import * as admin from "/ui/admin.js";
+import * as auth from "./ui/auth.js";
+import * as fb from "./ui/firebase.js";
+import * as lobbies from "./ui/lobbies.js";
+import * as admin from "./ui/admin.js";
 import {
  saveLocalReplay,
  loadLocalReplays,
  renameLocalReplay,
-} from "/ui/local-archive.js";
+} from "./ui/local-archive.js";
 
 // ─── Polyfills ───────────────────────────────────────────────────────────────
 

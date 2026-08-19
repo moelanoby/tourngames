@@ -20,7 +20,7 @@ import {
   getCurrentUser,
   startAuthListener,
   onAuthChange as firebaseOnAuthChange
-} from "/ui/firebase.js";
+} from "./firebase.js";
 
 const dom = {};
 

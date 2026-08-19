@@ -1146,9 +1146,6 @@ function handleFindMatchClick() {
 }
 
 async function fetchQuickLobbies() {
- const list = document.getElementById("quick-lobby-list");
- if (!list) return;
-async function fetchQuickLobbies() {
   const list = document.getElementById("quick-lobby-list");
   if (!list) return;
   try {

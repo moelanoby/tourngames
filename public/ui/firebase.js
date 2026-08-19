@@ -359,6 +359,38 @@ export function onGameState(lobbyId, callback) {
   return () => off(gameRef);
 }
 
+
+// ─── Lobby Chat/Messages ─────────────────────────────────────────────────────
+
+export async function sendLobbyMessage(lobbyId, message) {
+  if (!initialized) initFirebase();
+  const user = getCurrentUser();
+  if (!user) throw new Error("Not authenticated");
+
+  const msgRef = push(ref(db, `lobby_chat/${lobbyId}`));
+  await set(msgRef, {
+    id: msgRef.key,
+    from: user.uid,
+    fromName: user.displayName || user.email?.split("@")[0] || "Anonymous",
+    message,
+    timestamp: serverTimestamp()
+  });
+}
+
+export function onLobbyMessages(lobbyId, callback) {
+  if (!initialized) initFirebase();
+  const chatRef = ref(db, `lobby_chat/${lobbyId}`);
+  const q = query(chatRef, orderByChild("timestamp"), limitToLast(50));
+  onValue(q, (snapshot) => {
+    const messages = [];
+    snapshot.forEach((child) => {
+      messages.push(child.val());
+    });
+    callback(messages);
+  });
+  return () => off(q);
+}
+
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 export function cleanup() {

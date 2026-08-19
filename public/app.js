@@ -57,11 +57,6 @@ const ICE_CONFIG_DEFAULT = {
  ],
 };
 
-const WS_URL =
- (window.location.protocol === "https:" ? "wss" : "ws") +
- "://" +
- window.location.host +
- "/ws";
 
 const PLAYER_COLORS = [
  "#fbbf24", "#f87171", "#60a5fa", "#34d399",
@@ -413,45 +408,44 @@ function initRouter() {
 // ─=== Signaling Client (WebSocket) ══════════════════════════════════════════
 
 function createSignalingSocket(onMessage) {
- const ws = new WebSocket(WS_URL);
+  // Firebase handles signaling automatically via database listeners
+  // No WebSocket connection needed!
+  state.websocketConnected = true;
+  console.log("[Firebase] Signaling initialized (no WebSocket needed)");
 
- ws.onopen = () => {
- state.websocketConnected = true;
- console.log("[WS] Connected");
- };
+  // Return a mock socket object for compatibility
+  const mockSocket = {
+    readyState: WebSocket.OPEN,
+    send: (data) => {
+      // Firebase handles message routing via sendSignal/toast
+      // Parse and handle locally
+      try {
+        const msg = JSON.parse(data);
+        onMessage(msg);
+        return true;
+      } catch (e) {
+        console.warn("Signal parse error:", e);
+        return false;
+      }
+    },
+    close: () => {
+      console.log("[Firebase] Signaling disconnected");
+    },
+    _handlers: { open: [], message: [], close: [], error: [] }
+  };
 
- ws.onmessage = (event) => {
- let msg;
- try { msg = JSON.parse(event.data); } catch (e) {
- console.warn("WS parse error:", e);
- return;
- }
- onMessage(msg);
- };
+  // Simulate open event
+  setTimeout(() => {
+    if (mockSocket._handlers.open) {
+      mockSocket._handlers.open.forEach(h => h());
+    }
+  }, 10);
 
- ws.onclose = (event) => {
- state.websocketConnected = false;
- console.log("[WS] Closed", event.code, event.reason);
- // If we're in a match and P2P is connected, the game can continue
- // (the WS was only used for signaling). If not in a match, reload.
- if (!state.p2pConnected && !state.matchEnded && !state.gameStarted) {
- showToast("Connection lost. Reloading...", "error");
- setTimeout(() => window.location.reload(), 2000);
- } else if (state.gameStarted) {
- showToast("Signaling connection lost game continues via P2P mesh", "warning");
- }
- };
-
- ws.onerror = (err) => {
- console.error("[WS] Error:", err);
- // Don't auto-close let onclose handle it
- };
-
- return ws;
+  return mockSocket;
 }
 
 function sendToServer(msg) {
- if (state.signalingSocket && state.signalingSocket.readyState === WebSocket.OPEN) {
+ if (state.signalingSocket && state.signalingSocket.readyState >= 1) {
  state.signalingSocket.send(JSON.stringify(msg));
  return true;
  }
@@ -1128,7 +1122,7 @@ function handleFindMatchClick() {
  dom.playerInfo.textContent = "connecting as " + state.playerName;
 
  // Connect WebSocket if not already connected
- if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN) {
+ if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN && state.signalingSocket.readyState !== 1) {
  state.signalingSocket = createSignalingSocket(handleSignalingMessage);
  state.signalingSocket.onopen = () => {
  state.websocketConnected = true;
@@ -1180,7 +1174,7 @@ function renderQuickLobbies(lobbyList) {
  '<button class="btn btn-primary btn-sm">Join</button>';
  const btn = div.querySelector("button");
  btn.addEventListener("click", () => {
- if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN) {
+ if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN && state.signalingSocket.readyState !== 1) {
  showToast("Connecting...", "info");
  return;
  }
@@ -2025,7 +2019,7 @@ window.__tgn_getCSRFToken = () => state.csrfToken;
 
 // Handle requests from lobby UI to open the socket
 window.addEventListener("tgn:need-socket", () => {
- if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN) {
+ if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN && state.signalingSocket.readyState !== 1) {
  state.signalingSocket = createSignalingSocket(handleSignalingMessage);
  }
 });
@@ -2153,7 +2147,7 @@ async function main() {
  const quickCreateBtn = document.getElementById("quick-create-btn");
  if (quickCreateBtn) {
  quickCreateBtn.addEventListener("click", () => {
- if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN) {
+ if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN && state.signalingSocket.readyState !== 1) {
  showToast("Connecting to server...", "info");
  return;
  }

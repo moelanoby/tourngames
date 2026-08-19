@@ -2066,8 +2066,8 @@ async function main() {
  });
 
  // Fetch CSRF token (will be set if logged in)
- try {
   // Firebase auth handles authentication - no CSRF needed
+  // Initialize player name from localStorage
 
  // Initialize player name from localStorage
  initPlayer();

@@ -325,6 +325,3 @@ function showToast(message, type) {
  window.__tgn_showToast && window.__tgn_showToast(message, type);
 }
 
-  } catch (e) {
-    console.warn("[Admin] Disabled:", e.message);
-  }

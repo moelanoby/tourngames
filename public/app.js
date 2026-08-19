@@ -2146,23 +2146,33 @@ async function main() {
  // "Create new" lobby button (in the quick-lobbies panel)
  const quickCreateBtn = document.getElementById("quick-create-btn");
  if (quickCreateBtn) {
- quickCreateBtn.addEventListener("click", () => {
- if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN && state.signalingSocket.readyState !== 1) {
- showToast("Connecting to server...", "info");
- return;
- }
- const lobbyName = state.playerName + "'s Lobby";
- sendToServer({
- type: "create-lobby",
- name: lobbyName,
- gameId: state.gameConfig?.gameId || "chess-royale",
- lobbyType: "open",
- maxPlayers: 10,
- minPlayers: 2,
- hostName: state.playerName,
- });
- showToast("Creating lobby...", "info");
- });
+  quickCreateBtn.addEventListener("click", async () => {
+    const user = fb.getCurrentUser();
+    if (!user) {
+      showToast("Log in to create a lobby", "error");
+      return;
+    }
+    const lobbyName = state.playerName + "\'s Lobby";
+    try {
+      const lobby = await fb.createLobby({
+        name: lobbyName,
+        game: state.gameConfig?.gameId || "chess-royale",
+        type: "open",
+        maxPlayers: 10,
+        minPlayers: 2,
+        hostName: state.playerName,
+      });
+      showToast("Lobby created!", "success");
+      window.location.hash = "#/lobbies";
+      setTimeout(() => {
+        if (typeof lobbies.showDetail === "function") {
+          lobbies.showDetail(lobby.id);
+        }
+      }, 500);
+    } catch (e) {
+      showToast("Failed to create lobby: " + e.message, "error");
+    }
+  });
  }
  dom.setUsernameBtn.addEventListener("click", setUsername);
  dom.usernameInput.addEventListener("keydown", (e) => {

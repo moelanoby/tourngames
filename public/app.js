@@ -1902,13 +1902,13 @@ async function playReplay(replay) {
  : "Match";
  dom.replayTitle.textContent = matchTitle + " · " + (replay.winnerName || "Unknown") + " won";
 
- const gameModulePath = "games/" + (replay.gameModule || "chess-royale") + "/mod.js";
+ const gameModulePath = "./games/" + (replay.gameModule || "chess-royale") + "/mod.js";
  let mod;
  try {
  if (gameMgr.module && gameMgr.module.metadata?.id === replay.gameModule) {
  mod = gameMgr.module;
  } else {
- const imported = await import(gameModulePath);
+ const imported = await import("./" + gameModulePath);
  mod = imported.default || imported;
  }
  } catch (e) {
@@ -2093,11 +2093,11 @@ async function main() {
  // Load game config
  let gameConfig;
  try {
- const configRes = await fetch("/game-config.json");
+ const configRes = await fetch("./game-config.json");
  gameConfig = await configRes.json();
  } catch (e) {
  console.error("Failed to load game config:", e);
- gameConfig = { gameId: "chess-royale", gameModulePath: "games/chess-royale/mod.js", gameName: "Chess Royale", maxPlayers: 20 };
+ gameConfig = { gameId: "chess-royale", gameModulePath: "./games/chess-royale/mod.js", gameName: "Chess Royale", maxPlayers: 20 };
  }
 
  setLoadingText("loading game module...");

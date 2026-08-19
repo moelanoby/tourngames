@@ -51,7 +51,7 @@ Copy the JSON below and paste it into the Firebase Console:
 ## Step 4: Add Authorized Domains
 1. Project Settings → General → Your apps → Web app
 2. Under "Authorized domains", add:
-   - sillyveh.github.io
+   - moelanoby.github.io
    - localhost
 
 ## Step 5: Enable GitHub Pages
@@ -60,4 +60,4 @@ Copy the JSON below and paste it into the Firebase Console:
 3. Source: GitHub Action
 
 ## Done!
-Visit: https://sillyveh.github.io/tourngames/
+Visit: https://moelanoby.github.io/tourngames/

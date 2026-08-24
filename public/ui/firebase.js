@@ -400,7 +400,26 @@ export async function cleanupStaleLobbies() {
   });
 
   deadKeys.forEach((key) => { deleteLobby(key).catch(() => {}); });
-  return removed;
+
+  // Same QoL for per-match relay data: drop games/{id} nodes whose host
+  // stopped writing over an hour ago (abandoned matches).
+  let gamesRemoved = 0;
+  try {
+    const gamesSnap = await get(ref(db, "games"));
+    if (gamesSnap.exists()) {
+      const nowMs = Date.now();
+      gamesSnap.forEach((child) => {
+        const g = child.val() || {};
+        const updated = (g.state && g.state.updatedAt) || 0;
+        if (!updated || nowMs - updated > LOBBY_IDLE_MAX_MS) {
+          remove(ref(db, `games/${child.key}`)).catch(() => {});
+          gamesRemoved++;
+        }
+      });
+    }
+  } catch { /* games node optional */ }
+
+  return removed + gamesRemoved;
 }
 
 export function onLobbyListChange(callback) {

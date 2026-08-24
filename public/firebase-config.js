@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-window
 /**
  * Firebase Configuration for TournGames
  * 

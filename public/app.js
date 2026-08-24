@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-window no-window-prefix
 /**
  * app.js - TournGames Frontend Application (v0.3)
  *
@@ -17,16 +18,16 @@
  * - Signups: reserve slots in signup-type lobbies
  */
 
-import * as auth from "./ui/auth.js?v=20260924g";
-import * as fb from "./ui/firebase.js?v=20260924g";
-import * as lobbies from "./ui/lobbies.js?v=20260924g";
-import * as admin from "./ui/admin.js?v=20260924g";
+import * as auth from "./ui/auth.js?v=20260924h";
+import * as fb from "./ui/firebase.js?v=20260924h";
+import * as lobbies from "./ui/lobbies.js?v=20260924h";
+import * as admin from "./ui/admin.js?v=20260924h";
 import {
  saveLocalReplay,
  loadLocalReplays,
  renameLocalReplay,
-} from "./ui/local-archive.js?v=20260924g";
-import * as cookies from "./ui/cookies.js?v=20260924g";
+} from "./ui/local-archive.js?v=20260924h";
+import * as cookies from "./ui/cookies.js?v=20260924h";
 
 // ─── Polyfills ───────────────────────────────────────────────────────────────
 
@@ -787,7 +788,7 @@ class P2PClient {
 
  closeAll() {
  for (const pc of this.pcs.values()) {
- try { pc.close(); } catch {}
+ try { pc.close(); } catch { /* best-effort */ }
  }
  this.pcs.clear();
  this.channels.clear();
@@ -815,7 +816,7 @@ class GameManager {
 
  async loadGameModule(gameModulePath) {
  showLoading("Loading game module...");
- const mod = await import("./" + gameModulePath + "?v=20260924g");
+ const mod = await import("./" + gameModulePath + "?v=20260924h");
  this.module = mod.default || mod;
  return this.module;
  }
@@ -840,7 +841,7 @@ class GameManager {
  // Fresh Firebase relay for players whose P2P failed.
  if (state.currentLobbyId) {
  fb.clearLobbyGame(state.currentLobbyId).catch(() => {});
- if (this.lobbyInputsUnsub) { try { this.lobbyInputsUnsub(); } catch {} }
+ if (this.lobbyInputsUnsub) { try { this.lobbyInputsUnsub(); } catch { /* best-effort */ } }
  const lobbyId = state.currentLobbyId;
   this.lobbyInputsUnsub = fb.onLobbyInputs(lobbyId, (inputs, keysByPid) => {
   // Feed each relayed input into the host simulation, then delete
@@ -1210,8 +1211,8 @@ class GameManager {
  // the fallback for the NEXT match (subscribeToFirebaseState early-returns
  // while fbStateUnsub is set) and let stale old-lobby state/match-over
  // snapshots leak into the new match.
- if (this.fbStateUnsub) { try { this.fbStateUnsub(); } catch {} this.fbStateUnsub = null; }
- if (this.fbOverUnsub) { try { this.fbOverUnsub(); } catch {} this.fbOverUnsub = null; }
+ if (this.fbStateUnsub) { try { this.fbStateUnsub(); } catch { /* best-effort */ } this.fbStateUnsub = null; }
+ if (this.fbOverUnsub) { try { this.fbOverUnsub(); } catch { /* best-effort */ } this.fbOverUnsub = null; }
 
  this.hideEliminated();
  dom.viewReplayBtn.classList.add("hidden");
@@ -1360,10 +1361,10 @@ function renderQuickLobbies(lobbyList) {
 
 /** Clear local waiting-room state (no Firebase write). */
 function detachFromLobby() {
- if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch {} lobbyWatchUnsub = null; }
- if (chatUnsub) { try { chatUnsub(); } catch {} chatUnsub = null; }
+ if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch { /* best-effort */ } lobbyWatchUnsub = null; }
+ if (chatUnsub) { try { chatUnsub(); } catch { /* best-effort */ } chatUnsub = null; }
  // Stop receiving stale WebRTC signals targeted at the old lobby.
- if (signalsUnsub) { try { signalsUnsub(); } catch {} signalsUnsub = null; }
+ if (signalsUnsub) { try { signalsUnsub(); } catch { /* best-effort */ } signalsUnsub = null; }
  state.currentLobbyId = null;
  lobbies.setCurrentLobbyId(null);
  state.gameSettings = null;
@@ -1565,7 +1566,7 @@ function onLobbySnapshot(lobby) {
 }
 
 function attachLobbyWatcher(lobbyId) {
- if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch {} lobbyWatchUnsub = null; }
+ if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch { /* best-effort */ } lobbyWatchUnsub = null; }
  if (lobbyPollTimer) { clearInterval(lobbyPollTimer); lobbyPollTimer = null; }
  lastSeenStatus = null;
  if (!lobbyId) return;
@@ -2081,7 +2082,7 @@ function sendSignalToPeer(toUid, type, data) {
 // Listen for incoming WebRTC signals from other lobby members.
 let signalsUnsub = null;
 function listenForSignals() {
- if (signalsUnsub) { try { signalsUnsub(); } catch {} signalsUnsub = null; }
+ if (signalsUnsub) { try { signalsUnsub(); } catch { /* best-effort */ } signalsUnsub = null; }
  const lobbyId = state.currentLobbyId;
  if (!lobbyId) return;
  signalsUnsub = fb.onSignal(lobbyId, (signal) => {
@@ -2307,7 +2308,7 @@ async function playReplay(replay) {
  } else {
  // Same specifier as loadGameModule() - a mismatched URL would evaluate
  // the module twice, splitting its mutable state (pendingInput etc.).
- const imported = await import("./" + gameModulePath + "?v=20260924g");
+ const imported = await import("./" + gameModulePath + "?v=20260924h");
  mod = imported.default || imported;
  }
  } catch (e) {

@@ -556,7 +556,8 @@ async function handleReplaysApi(req: Request, action: string): Promise<Response>
  * game module file to extract the description from the first comment block.
  *
  * The game name is derived from the directory name (e.g. "team-chess").
- * The description is the first block comment (/** ... *​/) in the module file.
+ * The description is the first block comment ("star-slash terminated") in
+ * the module file.
  */
 async function handleGameConfigApi(): Promise<Response> {
  try {

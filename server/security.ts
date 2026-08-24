@@ -228,7 +228,8 @@ export function revokeCSRFToken(sessionToken: string): void {
 export function sanitizeString(str: unknown, maxLen = 1000): string {
  if (typeof str !== "string") return "";
  return str
- .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") // control chars
+ // deno-lint-ignore no-control-regex -- sanitization IS the removal of control chars
+ .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
  .slice(0, maxLen)
  .trim();
 }

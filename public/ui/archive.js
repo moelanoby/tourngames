@@ -9,7 +9,7 @@ let replayModule = null;
 let replayAnimationFrame = null;
 let replayPlaying = false;
 let replayCurrentFrame = 0;
-let replayFPS = 30;
+const replayFPS = 30;
 let replaySpeed = 1;
 
 /**

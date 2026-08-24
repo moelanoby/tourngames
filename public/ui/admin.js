@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-window
 /**
  * admin.js Admin Panel UI module
  *

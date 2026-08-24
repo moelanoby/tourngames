@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-window no-window-prefix
 /**
  * lobbies.js - Lobby Browser UI Module (Firebase Version)
  *
@@ -23,7 +24,7 @@ import {
   updatePresence,
   sendLobbyMessage,
   onLobbyMessages,
-} from "./firebase.js?v=20260924g";
+} from "./firebase.js?v=20260924h";
 
 const dom = {};
 let currentLobbyId = null;

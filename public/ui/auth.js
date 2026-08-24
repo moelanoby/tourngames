@@ -20,7 +20,7 @@ import {
   getCurrentUser,
   startAuthListener,
   onAuthChange as firebaseOnAuthChange
-} from "./firebase.js?v=20260924f";
+} from "./firebase.js?v=20260924g";
 // Same module URL as firebase.js imports - shares the SDK instance.
 import { updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 

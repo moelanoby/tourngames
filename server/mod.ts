@@ -34,6 +34,7 @@ import {
  recordSuccessfulLogin,
  isAccountLocked,
  getLockoutRemaining,
+ parseCookies,
 } from "./auth.ts";
 import {
  createLobby,
@@ -50,6 +51,7 @@ import {
  handleWebSocketMessage,
  handleWebSocketClose,
  connections,
+ closeUserConnections,
  ICE_CONFIG,
 } from "./signaling.ts";
 import type { HandleContext } from "./signaling.ts";
@@ -64,6 +66,8 @@ import {
  rateLimitLobbyCreate,
  rateLimitSignup,
  validateCSRFToken,
+ csrfMatches,
+ revokeCSRFToken,
  validatePasswordStrength,
  sanitizeString,
  sanitizeLobbyName,
@@ -184,23 +188,32 @@ async function readJsonBody(req: Request): Promise<any> {
 }
 
 function getSessionToken(req: Request): string | null {
- const cookies = req.headers.get("cookie") || "";
- const match = cookies.match(/tgn_session=([^;]+)/);
- return match ? match[1]! : null;
+ // Strict cookie parse: a regex on the raw header would match substrings
+ // of other cookies (e.g. "xtgn_session").
+ return parseCookies(req.headers.get("cookie"))["tgn_session"] ?? null;
 }
 
-function checkCSRF(req: Request): boolean {
+async function checkCSRF(req: Request): Promise<boolean> {
  const sessionToken = getSessionToken(req);
  if (!sessionToken) return false;
  const csrfToken = req.headers.get("x-csrf-token");
  if (!csrfToken) return false;
- return validateCSRFToken(sessionToken, csrfToken);
+ // Fast path: this isolate issued the token.
+ if (validateCSRFToken(sessionToken, csrfToken)) return true;
+ // Cross-isolate / post-restart path: compare (constant-time) against the
+ // KV-backed session's persisted token, so a request landing on another
+ // Deno Deploy isolate is not rejected with a spurious 403.
+ try {
+ const session = await getSession(sessionToken);
+ if (session && csrfMatches(csrfToken, session.csrfToken)) return true;
+ } catch { /* fall through */ }
+ return false;
 }
 
 /** Require CSRF for state-changing requests. Returns error response if invalid. */
-function requireCSRF(req: Request): Response | null {
+async function requireCSRF(req: Request): Promise<Response | null> {
  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return null;
- if (!checkCSRF(req)) {
+ if (!(await checkCSRF(req))) {
  return json({ error: "Invalid or missing CSRF token. Refresh the page and try again." }, 403);
  }
  return null;
@@ -312,6 +325,11 @@ async function handleAuthApi(req: Request, action: string): Promise<Response> {
 
  // ── Logout ──
  if (action === "logout" && req.method === "POST") {
+ // CSRF-protect logout too (login-CSRF annoyance vector). The current
+ // client signs out via Firebase and never calls this endpoint, so the
+ // extra check is safe.
+ const csrfErr = await requireCSRF(req);
+ if (csrfErr) return csrfErr;
  const token = getSessionToken(req);
  if (token) {
  const session = await getSession(token);
@@ -326,6 +344,7 @@ async function handleAuthApi(req: Request, action: string): Promise<Response> {
  });
  }
  }
+ revokeCSRFToken(token);
  await deleteSession(token);
  }
  return json({ ok: true }, 200, {
@@ -401,7 +420,7 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
 
  // ── Create Lobby (HTTP alternative to WS) ──
  if (action === "" && req.method === "POST") {
- const csrfErr = requireCSRF(req);
+ const csrfErr = await requireCSRF(req);
  if (csrfErr) return csrfErr;
 
  const auth = await getAuthState(req);
@@ -456,7 +475,7 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  if (!lobby) return json({ error: "Lobby not found" }, 404);
 
  if (sub === "signup" && req.method === "POST") {
- const csrfErr = requireCSRF(req);
+ const csrfErr = await requireCSRF(req);
  if (csrfErr) return csrfErr;
 
  const auth = await getAuthState(req);
@@ -472,7 +491,7 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  }
 
  if (sub === "signup" && req.method === "DELETE") {
- const csrfErr = requireCSRF(req);
+ const csrfErr = await requireCSRF(req);
  if (csrfErr) return csrfErr;
 
  const auth = await getAuthState(req);
@@ -635,10 +654,31 @@ async function handleApi(req: Request, urlPath: string): Promise<Response> {
 // every restart. No ghost players or stale lobbies.
 
 console.log("[Startup] Purging all lobbies and related data...");
-const purgedCount = await purgeAllLobbies();
-console.log(`[Startup] Purged ${purgedCount} lobbies.`);
+// Startup purge is now OPT-IN: on Deno Deploy every isolate cold-start
+// (including routine deploys while old isolates still serve traffic) used to
+// delete ALL lobbies and pending WebRTC signals cluster-wide, killing active
+// matches. Run with PURGE_ON_BOOT=1 only for explicit maintenance.
+if (Deno.env.get("PURGE_ON_BOOT") === "1") {
+ const purgedCount = await purgeAllLobbies();
+ console.log(`[Startup] Purged ${purgedCount} lobbies.`);
+}
 
 // ─── Main Server ─────────────────────────────────────────────────────────────
+
+/** Concurrent WebSocket connections allowed per client IP. */
+const MAX_WS_PER_IP = 10;
+const wsConnectionsByIp = new Map<string, number>();
+
+const EXTRA_ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") || "")
+ .split(",").map((s) => s.trim()).filter(Boolean);
+
+function wsOriginAllowed(origin: string | null, selfOrigin: string): boolean {
+ if (!origin) return true; // non-browser client
+ if (origin === selfOrigin) return true;
+ if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)) return true;
+ if (origin === "https://moelanoby.github.io") return true; // deployed frontend
+ return EXTRA_ALLOWED_ORIGINS.includes(origin);
+}
 
 Deno.serve(async (req: Request) => {
  const url = new URL(req.url);
@@ -663,6 +703,23 @@ Deno.serve(async (req: Request) => {
  if (path === "/ws" || path === "/signaling") {
  const upgradeHeader = req.headers.get("upgrade");
  if (upgradeHeader?.toLowerCase() === "websocket") {
+ // Origin allowlist: block cross-site WebSocket hijacking. Browsers
+ // always send Origin; non-browser clients may omit it. Defaults cover
+ // same-origin, localhost dev, and the GitHub Pages deploy origin;
+ // override with ALLOWED_ORIGINS="a,b,c".
+ const origin = req.headers.get("origin");
+ if (!wsOriginAllowed(origin, url.origin)) {
+ console.warn(`[WS] rejected upgrade from origin: ${origin ?? "(none)"}`);
+ return new Response("Forbidden", { status: 403 });
+ }
+ // Per-IP concurrent connection cap: without it one machine can open
+ // hundreds of sockets, each with its own rate budget.
+ const wsIp = getClientIp(req);
+ const ipCount = wsConnectionsByIp.get(wsIp) ?? 0;
+ if (ipCount >= MAX_WS_PER_IP) {
+ console.warn(`[WS] connection cap reached for ${wsIp}`);
+ return new Response("Too many connections", { status: 429 });
+ }
  const cookies = req.headers.get("cookie") || "";
  const match = cookies.match(/tgn_session=([^;]+)/);
  let userId: string | null = null;
@@ -718,6 +775,7 @@ Deno.serve(async (req: Request) => {
  }
 
  connections.set(playerId, { lobbyId: null, ws: socket, userId, username });
+ wsConnectionsByIp.set(wsIp, ipCount + 1);
 
  socket.onopen = () => {
  safeSendLocal(socket, {
@@ -741,6 +799,9 @@ Deno.serve(async (req: Request) => {
  handleWebSocketClose(playerId).catch((err) => {
  console.error("[WS] close handler error:", err);
  });
+ const c = wsConnectionsByIp.get(wsIp) ?? 1;
+ if (c <= 1) wsConnectionsByIp.delete(wsIp);
+ else wsConnectionsByIp.set(wsIp, c - 1);
  console.log(`[WS] Player ${playerId} disconnected`);
  };
 

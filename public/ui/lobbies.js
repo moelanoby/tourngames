@@ -23,7 +23,7 @@ import {
   updatePresence,
   sendLobbyMessage,
   onLobbyMessages,
-} from "./firebase.js?v=20260924f";
+} from "./firebase.js?v=20260924g";
 
 const dom = {};
 let currentLobbyId = null;

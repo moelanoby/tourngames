@@ -261,10 +261,40 @@ Deno.test("SECURITY: sanitizeLobbyName limits to 60 chars", () => {
 });
 
 Deno.test("SECURITY: getClientIp extracts from X-Forwarded-For", () => {
+ // M1 fix: only the LAST (proxy-added) hop is trusted; earlier entries are
+ // attacker-controllable via spoofed XFF headers.
  const req = new Request("https://example.com", {
  headers: { "x-forwarded-for": "1.2.3.4, 5.6.7.8" },
  });
- assertEquals(getClientIp(req), "1.2.3.4");
+ assertEquals(getClientIp(req), "5.6.7.8");
+});
+
+Deno.test("SECURITY: getClientIp prefers platform headers over XFF", () => {
+ const req = new Request("https://example.com", {
+ headers: {
+ "fly-client-ip": "10.9.8.7",
+ "cf-connecting-ip": "10.9.8.6",
+ "x-forwarded-for": "1.2.3.4, 5.6.7.8",
+ "x-real-ip": "9.8.7.6",
+ },
+ });
+ assertEquals(getClientIp(req), "10.9.8.7");
+
+ const req2 = new Request("https://example.com", {
+ headers: {
+ "cf-connecting-ip": "10.9.8.6",
+ "x-forwarded-for": "1.2.3.4, 5.6.7.8",
+ },
+ });
+ assertEquals(getClientIp(req2), "10.9.8.6");
+});
+
+Deno.test("SECURITY: getClientIp caps XFF parsing at 10 hops", () => {
+ const many = Array.from({ length: 30 }, (_, i) => `10.0.0.${i + 1}`).join(", ");
+ const req = new Request("https://example.com", {
+ headers: { "x-forwarded-for": many },
+ });
+ assertEquals(getClientIp(req), "10.0.0.30"); // last of the final 10 entries
 });
 
 Deno.test("SECURITY: getClientIp extracts from X-Real-IP", () => {

@@ -48,6 +48,30 @@ export interface ConnectionInfo {
 
 const connections = new Map<string, ConnectionInfo>();
 
+// Match-over integrity state (see "match-over" case): lobbies whose current
+// match result was already recorded, and pending reset timers per lobby id.
+const recordedMatches = new Set<string>();
+const matchOverTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Force-close every open WebSocket belonging to an auth user id.
+ * Called when that user is banned so they cannot keep signaling/messaging
+ * on a session established before the ban.
+ */
+export function closeUserConnections(userId: string, code = 4003, reason = "Account banned"): number {
+ let closed = 0;
+ for (const [pid, info] of connections.entries()) {
+ if (info.userId === userId) {
+ try {
+ info.ws.close(code, reason);
+ } catch { /* already closing */ }
+ connections.delete(pid);
+ closed++;
+ }
+ }
+ return closed;
+}
+
 export function getConnection(playerId: string): ConnectionInfo | undefined {
  return connections.get(playerId);
 }
@@ -380,18 +404,29 @@ export async function handleWebSocketMessage(
  case "offer":
  case "answer":
  case "ice-candidate": {
+ // Validate the relay: sender and target must BOTH be connected and
+ // share a lobby. Without this, any connected client could relay to
+ // arbitrary peer ids across lobbies, and garbage msg.to keys would
+ // pollute KV with unbounded store-and-forward entries.
+ const senderInfo = connections.get(playerId);
+ const targetInfo = typeof msg.to === "string" ? connections.get(msg.to) : undefined;
+ if (!senderInfo?.lobbyId || !targetInfo || targetInfo.lobbyId !== senderInfo.lobbyId) {
+ safeSend(ws, {
+ type: "signal-rejected",
+ to: msg.to ?? null,
+ reason: "target not in the same lobby",
+ });
+ break;
+ }
  // Store in KV (phonebook backup)
  await storeSignal(msg.to, playerId, msg.type, msg.data);
  // Relay in real-time via WS
- const target = connections.get(msg.to);
- if (target) {
- safeSend(target.ws, {
+ safeSend(targetInfo.ws, {
  type: msg.type,
  from: playerId,
  to: msg.to,
  data: msg.data,
  });
- }
  break;
  }
 
@@ -413,14 +448,21 @@ export async function handleWebSocketMessage(
  // ── P2P Ready Notification ─────────────────────────────────────────────
  case "p2p-ready": {
  if (!info?.lobbyId) return;
+ // Per-player idempotent flag instead of a bare counter: concurrent
+ // ready messages used to read the same count and lose increments.
  const lobby = await getLobby(info.lobbyId);
  if (!lobby) return;
  const fresh = await getLobby(lobby.id);
  if (!fresh) return;
- fresh.p2pReadyCount = (fresh.p2pReadyCount || 0) + 1;
+ const ready = (fresh.p2pReady && typeof fresh.p2pReady === "object")
+ ? { ...fresh.p2pReady }
+ : {};
+ const alreadyReady = !!ready[playerId];
+ ready[playerId] = true;
+ fresh.p2pReady = ready;
  await updateLobby(fresh);
  const freshPlayers = Array.isArray(fresh.players) ? fresh.players : [];
- if (fresh.p2pReadyCount >= freshPlayers.length && freshPlayers.length >= 2) {
+ if (!alreadyReady && Object.keys(ready).length >= freshPlayers.length && freshPlayers.length >= 2) {
  await broadcastLobbyState(fresh.id, {
  type: "p2p-connected",
  hostId: fresh.hostId,
@@ -430,14 +472,44 @@ export async function handleWebSocketMessage(
  }
 
  // ── Match-Over (stats recording only no game-state relay) ────────────
- // The host reports the match result so the server can update user stats.
+ // The HOST reports the match result so the server can update user stats.
  // Game-over is communicated to clients via the P2P mesh, not via the server.
+ //
+ // Guards (win-farming previously trivial): only during a live match,
+ // host-only, once per match, and the winner must be a lobby member.
  case "match-over": {
  if (!info?.lobbyId) return;
  const lobby = await getLobby(info.lobbyId);
- if (lobby) {
+ if (!lobby) return;
+
+ // 1. Only while a match is live or just finishing.
+ if (lobby.status !== "starting" && lobby.status !== "playing") {
+ safeSend(ws, { type: "match-over-ack", ignored: "match not active" });
+ break;
+ }
+
+ // 2. Host only (player id or auth uid must match the lobby host).
+ const isHost = lobby.hostId === playerId
+ || (lobby.hostUserId && info.userId && lobby.hostUserId === info.userId);
+ if (!isHost) {
+ safeSend(ws, { type: "match-over-ack", ignored: "not host" });
+ break;
+ }
+
+ // 3. Once per match: persisted flag + same-isolate memory guard against
+ // the read-check-write window before updateLobby lands.
+ if ((lobby as { resultRecorded?: boolean }).resultRecorded || recordedMatches.has(lobby.id)) {
+ safeSend(ws, { type: "match-over-ack", ignored: "result already recorded" });
+ break;
+ }
+ recordedMatches.add(lobby.id);
+ lobby.resultRecorded = true;
+ await updateLobby(lobby);
+
  const lobbyPlayers = Array.isArray(lobby.players) ? lobby.players : [];
- const winner = lobbyPlayers.find((p) => p.id === msg.winner);
+ const winner = typeof msg.winner === "string"
+ ? lobbyPlayers.find((p) => p.id === msg.winner)
+ : undefined;
  if (winner?.userId) {
  await recordUserWin(winner.userId);
  }
@@ -446,15 +518,25 @@ export async function handleWebSocketMessage(
  await recordUserMatch(p.userId);
  }
  }
- }
  safeSend(ws, { type: "match-over-ack" });
- // Reset lobby to waiting after match
- setTimeout(async () => {
- if (info.lobbyId) {
- await resetLobbyToWaiting(info.lobbyId);
+ // Reset lobby to waiting after a grace period. Capture the id and
+ // re-verify inside the timer: the reporter may have left for another
+ // lobby meanwhile, and rapid re-reports must not stack resets.
+ const lid = lobby.id;
+ const existing = matchOverTimers.get(lid);
+ if (existing) clearTimeout(existing);
+ matchOverTimers.set(lid, setTimeout(async () => {
+ matchOverTimers.delete(lid);
+ recordedMatches.delete(lid); // allow the NEXT match in this lobby to report
+ try {
+ const l = await getLobby(lid);
+ if (!l) return; // lobby gone - nothing to reset
+ await resetLobbyToWaiting(lid);
  await broadcastLobbyList();
+ } catch (e) {
+ console.error("[WS] match-over reset failed:", e);
  }
- }, 5000);
+ }, 5000));
  break;
  }
 

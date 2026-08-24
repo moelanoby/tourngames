@@ -94,8 +94,8 @@ export async function getLobby(lobbyId: string): Promise<Lobby | null> {
  return res.value || null;
 }
 
-export async function updateLobby(lobby: Lobby): Promise<void> {
- // Defensive: ensure players and signups are clean arrays of plain objects
+// Defensive: ensure players and signups are clean arrays of plain objects
+function normalizeLobbyForWrite(lobby: Lobby): void {
  if (Array.isArray(lobby.players)) {
  lobby.players = lobby.players.map((p) => ({
  id: typeof p.id === "string" ? p.id : String(p.id || ""),
@@ -111,6 +111,10 @@ export async function updateLobby(lobby: Lobby): Promise<void> {
  signedUpAt: typeof s.signedUpAt === "number" ? s.signedUpAt : Date.now(),
  }));
  }
+}
+
+export async function updateLobby(lobby: Lobby): Promise<void> {
+ normalizeLobbyForWrite(lobby);
  lobby.updatedAt = Date.now();
  try {
  await kv.set(["lobby", lobby.id], lobby);
@@ -200,30 +204,97 @@ export async function listLobbies(gameId?: string, includePrivate = false): Prom
 
 // ─── Player Management ───────────────────────────────────────────────────────
 
+// Retries for optimistic-concurrency conflicts on lobby writes.
+const LOBBY_WRITE_RETRIES = 3;
+
+type LobbyMutationOutcome = {
+ /** Validation result of the mutation itself. */
+ ok: boolean;
+ reason?: string;
+ /** Whether the mutation produced a change that must be persisted. */
+ write: boolean;
+};
+
+/**
+ * Run a lobby mutation atomically against fresh KV state.
+ *
+ * Each attempt fetches the current entry, applies `mutate` to a copy of it
+ * (so capacity/duplicate checks are re-verified on live data, not a stale
+ * snapshot), then commits with a versionstamp check via kv.atomic(). On
+ * commit conflict the loop retries with a fresh get, up to
+ * {@link LOBBY_WRITE_RETRIES} times.
+ *
+ * The caller-supplied `lobby` is only used as a fallback when the entry has
+ * vanished from KV between the caller's read and now (legacy behavior:
+ * mutate and plain-set). Return contract matches the old functions so
+ * callers checking ok/reason are unaffected.
+ */
+async function mutateLobbyAtomically(
+ lobby: Lobby,
+ mutate: (fresh: Lobby) => LobbyMutationOutcome,
+): Promise<{ ok: boolean; reason?: string; lobby: Lobby }> {
+ const key = ["lobby", lobby.id];
+ let lastSnapshot = lobby;
+ for (let attempt = 0; attempt < LOBBY_WRITE_RETRIES; attempt++) {
+ const entry = await kv.get<Lobby>(key);
+ const current = entry.value;
+ if (!current) {
+ // Entry gone (e.g. swept between reads): fall back to legacy path.
+ const outcome = mutate(lobby);
+ if (!outcome.write) return { ok: outcome.ok, reason: outcome.reason, lobby };
+ await updateLobby(lobby);
+ return { ok: outcome.ok, reason: outcome.reason, lobby };
+ }
+ lastSnapshot = current;
+ const candidate: Lobby = structuredClone(current);
+ normalizeLobbyForWrite(candidate);
+ const outcome = mutate(candidate);
+ if (!outcome.ok || !outcome.write) {
+ return { ok: outcome.ok, reason: outcome.reason, lobby: current };
+ }
+ candidate.updatedAt = Date.now();
+ normalizeLobbyForWrite(candidate);
+ const res = await kv.atomic()
+ .check({ key, versionstamp: entry.versionstamp })
+ .set(key, candidate)
+ .commit();
+ if (res.ok) return { ok: true, lobby: candidate };
+ // Version conflict → someone else wrote; retry on a fresh snapshot.
+ }
+ return {
+ ok: false,
+ reason: "Lobby was modified concurrently, please retry",
+ lobby: lastSnapshot,
+ };
+}
+
 export async function addPlayerToLobby(
  lobby: Lobby,
  player: PlayerSession,
 ): Promise<{ ok: boolean; reason?: string; lobby: Lobby }> {
+ return mutateLobbyAtomically(lobby, (fresh) => {
  // Null-safe: ensure players array exists (old lobby entries may not have it)
- if (!Array.isArray(lobby.players)) lobby.players = [];
- if (!Array.isArray(lobby.signups)) lobby.signups = [];
- if (lobby.status !== "waiting") {
- return { ok: false, reason: "Lobby is not waiting for players", lobby };
+ if (!Array.isArray(fresh.players)) fresh.players = [];
+ if (!Array.isArray(fresh.signups)) fresh.signups = [];
+ if (fresh.status !== "waiting") {
+ return { ok: false, reason: "Lobby is not waiting for players", write: false };
  }
- if (lobby.players.find((p) => p.id === player.id)) {
- return { ok: true, lobby };
+ if (fresh.players.find((p) => p.id === player.id)) {
+ return { ok: true, write: false }; // already joined — idempotent
  }
- if (lobby.players.length >= (lobby.maxPlayers || 10)) {
- return { ok: false, reason: "Lobby is full", lobby };
+ // Capacity is checked INSIDE the transaction data, closing the
+ // two-concurrent-joins-overfill race.
+ if (fresh.players.length >= (fresh.maxPlayers || 10)) {
+ return { ok: false, reason: "Lobby is full", write: false };
  }
- lobby.players.push(player);
- if (lobby.hostId === null) {
- lobby.hostId = player.id;
- lobby.hostName = player.name;
- lobby.hostUserId = player.userId || null;
+ fresh.players.push(player);
+ if (fresh.hostId === null) {
+ fresh.hostId = player.id;
+ fresh.hostName = player.name;
+ fresh.hostUserId = player.userId || null;
  }
- await updateLobby(lobby);
- return { ok: true, lobby };
+ return { ok: true, write: true };
+ });
 }
 
 export async function removePlayerFromLobby(
@@ -253,26 +324,31 @@ export async function removePlayerFromLobby(
 // ─── Signups ─────────────────────────────────────────────────────────────────
 
 export async function addSignup(lobby: Lobby, userId: UserID, username: string): Promise<{ ok: boolean; reason?: string; lobby: Lobby }> {
+ let addedEntry: SignupEntry | null = null;
+ const result = await mutateLobbyAtomically(lobby, (fresh) => {
  // Null-safe: ensure signups array exists
- if (!Array.isArray(lobby.signups)) lobby.signups = [];
- if (lobby.type !== "signup") {
- return { ok: false, reason: "Lobby does not use signups", lobby };
+ if (!Array.isArray(fresh.signups)) fresh.signups = [];
+ if (fresh.type !== "signup") {
+ return { ok: false, reason: "Lobby does not use signups", write: false };
  }
- if (lobby.signups.find((s) => s.userId === userId)) {
- return { ok: true, lobby }; // already signed up
+ if (fresh.signups.find((s) => s.userId === userId)) {
+ return { ok: true, write: false }; // already signed up — idempotent
  }
- if (lobby.signups.length >= (lobby.maxPlayers || 10)) {
- return { ok: false, reason: "Signups are full", lobby };
+ // Capacity is re-verified inside the transaction data.
+ if (fresh.signups.length >= (fresh.maxPlayers || 10)) {
+ return { ok: false, reason: "Signups are full", write: false };
  }
- const entry: SignupEntry = {
- userId,
- username,
- signedUpAt: Date.now(),
- };
- lobby.signups.push(entry);
- await updateLobby(lobby);
+ addedEntry = { userId, username, signedUpAt: Date.now() };
+ fresh.signups.push(addedEntry);
+ return { ok: true, write: true };
+ });
+ // Only persist the signup index row once the lobby mutation actually
+ // committed (avoids orphan index rows on conflict/full/duplicate).
+ if (result.ok && addedEntry) {
+ const entry: SignupEntry = addedEntry;
  await kv.set(["signup", lobby.id, userId], entry);
- return { ok: true, lobby };
+ }
+ return result;
 }
 
 export async function removeSignup(lobby: Lobby, userId: UserID): Promise<Lobby> {
@@ -286,19 +362,26 @@ export async function removeSignup(lobby: Lobby, userId: UserID): Promise<Lobby>
 // ─── Match Start ─────────────────────────────────────────────────────────────
 
 export async function startLobbyMatch(lobby: Lobby): Promise<{ ok: boolean; reason?: string; lobby: Lobby }> {
- if (!Array.isArray(lobby.players)) lobby.players = [];
- if (lobby.status !== "waiting") {
- return { ok: false, reason: "Lobby is not in waiting state", lobby };
+ return mutateLobbyAtomically(lobby, (fresh) => {
+ if (!Array.isArray(fresh.players)) fresh.players = [];
+ if (fresh.status !== "waiting") {
+ return { ok: false, reason: "Lobby is not in waiting state", write: false };
  }
- if (lobby.players.length < (lobby.minPlayers || 2)) {
- return { ok: false, reason: `Need at least ${lobby.minPlayers || 2} players`, lobby };
+ // Player count re-checked inside the transaction data so a concurrent
+ // leave cannot strand a started match below minPlayers.
+ if (fresh.players.length < (fresh.minPlayers || 2)) {
+ return { ok: false, reason: `Need at least ${fresh.minPlayers || 2} players`, write: false };
  }
- lobby.status = "starting";
- lobby.seed = generateSeed();
- lobby.p2pReadyCount = 0;
- lobby.startedAt = Date.now();
- await updateLobby(lobby);
- return { ok: true, lobby };
+ fresh.status = "starting";
+ fresh.seed = generateSeed();
+ fresh.p2pReadyCount = 0;
+ // New match: clear the previous match's bookkeeping so its recorded-result
+ // guard and stale ready flags cannot suppress the next report.
+ fresh.resultRecorded = false;
+ fresh.p2pReady = {};
+ fresh.startedAt = Date.now();
+ return { ok: true, write: true };
+ });
 }
 
 export async function endLobbyMatch(lobbyId: string): Promise<void> {
@@ -315,12 +398,14 @@ export async function endLobbyMatch(lobbyId: string): Promise<void> {
 export async function resetLobbyToWaiting(lobbyId: string): Promise<Lobby | null> {
  const lobby = await getLobby(lobbyId);
  if (!lobby) return null;
- lobby.status = "waiting";
- lobby.seed = null;
- lobby.p2pReadyCount = 0;
- lobby.startedAt = null;
- await updateLobby(lobby);
- return lobby;
+ const result = await mutateLobbyAtomically(lobby, (fresh) => {
+ fresh.status = "waiting";
+ fresh.seed = null;
+ fresh.p2pReadyCount = 0;
+ fresh.startedAt = null;
+ return { ok: true, write: true };
+ });
+ return result.lobby;
 }
 
 export { generateId, generateSeed, generateInviteCode, LOBBY_TIMEOUT_MS };

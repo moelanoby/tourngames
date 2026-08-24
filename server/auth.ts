@@ -93,20 +93,37 @@ export function generateSessionToken(): string {
 
 const kv = await Deno.openKv();
 
-export async function createUser(username: string, password: string, actorIp = "unknown"): Promise<User> {
+/**
+ * Result of one registration attempt:
+ * - "username-taken": the username was claimed before this attempt committed
+ * - "init-claimed": this attempt wanted the first-admin bootstrap, but a
+ *   concurrent registration initialized the system first
+ * - "conflict": generic concurrent-write conflict (safe to retry once)
+ */
+type CreateUserAttempt =
+ | { ok: true; user: User }
+ | { ok: false; reason: "username-taken" | "init-claimed" | "conflict" };
+
+async function attemptCreateUser(
+ username: string,
+ password: string,
+ actorIp: string,
+ allowAdminBootstrap: boolean,
+): Promise<CreateUserAttempt> {
  const usernameLower = username.toLowerCase().trim();
 
- // Check if username is taken (atomic check)
+ // Fast-path friendly errors (the atomic checks below are authoritative)
  const existingKey = ["user-username", usernameLower];
- const existing = await kv.get<User>(existingKey);
+ const existing = await kv.get<string>(existingKey);
  if (existing.value) {
  throw new Error("Username already taken");
  }
 
- // Check if this is the first user (becomes admin)
+ // Provisional read used only to build the record. The authoritative
+ // first-admin decision is made inside the atomic transaction below.
  const initKey = ["system", "initialized"];
  const initialized = await kv.get<boolean>(initKey);
- const isFirstUser = !initialized.value;
+ const isFirstUser = allowAdminBootstrap && !initialized.value;
 
  const userId = crypto.randomUUID();
  const { hash, salt } = await hashPassword(password);
@@ -131,20 +148,39 @@ export async function createUser(username: string, password: string, actorIp = "
  lastLoginIp: null,
  };
 
- // Atomic insert: only succeeds if username still free
- const res = await kv.atomic()
- .check(existing)
+ // Atomic insert. When bootstrapping, it succeeds only if BOTH the
+ // username is still free AND the system has not been initialized yet.
+ // The init flag is written inside the same transaction, closing the race
+ // where two concurrent registrations both observed isFirstUser === true
+ // and both became admin.
+ let txn = kv.atomic()
+ .check({ key: existingKey, versionstamp: null });
+ if (isFirstUser) {
+ txn = txn.check({ key: initKey, versionstamp: null });
+ }
+ txn = txn
  .set(["user", userId], user)
  .set(existingKey, userId)
- .commit();
+ .set(initKey, true);
+ const res = await txn.commit();
 
  if (!res.ok) {
- throw new Error("Username already taken (race)");
+ // Another writer won one of the keys we checked; figure out which so
+ // the caller can decide how to retry.
+ const [reExisting, reInit] = await Promise.all([
+ kv.get<string>(existingKey),
+ kv.get<boolean>(initKey),
+ ]);
+ if (reExisting.value) {
+ throw new Error("Username already taken");
+ }
+ if (isFirstUser && reInit.value) {
+ return { ok: false, reason: "init-claimed" };
+ }
+ return { ok: false, reason: "conflict" };
  }
 
- // Mark system as initialized
  if (isFirstUser) {
- await kv.set(initKey, true);
  await auditLog({
  action: "first-admin-created",
  actorId: userId,
@@ -161,7 +197,69 @@ export async function createUser(username: string, password: string, actorIp = "
  actorIp,
  });
 
- return user;
+ return { ok: true, user };
+}
+
+export async function createUser(
+ username: string,
+ password: string,
+ actorIp = "unknown",
+): Promise<User> {
+ let res = await attemptCreateUser(username, password, actorIp, true);
+ if (!res.ok && res.reason === "init-claimed") {
+ // The first-admin bootstrap was claimed concurrently. Retry exactly
+ // once as an ordinary (non-admin) registration under the same name.
+ res = await attemptCreateUser(username, password, actorIp, false);
+ }
+ if (!res.ok) {
+ if (res.reason === "username-taken") {
+ throw new Error("Username already taken");
+ }
+ throw new Error("Registration conflict from concurrent activity, please retry");
+ }
+ return res.user;
+}
+
+const USER_UPDATE_RETRIES = 3;
+
+function sleepJittered(attempt: number): Promise<void> {
+ // Small randomized backoff so competing writers do not retry in lockstep
+ const ms = Math.round(5 + attempt * 15 + Math.random() * 20);
+ return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Optimistic-concurrency update of a stored user record.
+ *
+ * Reads a fresh copy, applies `mutate`, and commits it in a single atomic
+ * transaction guarded by the entry's versionstamp. On a concurrent-write
+ * conflict the whole get/mutate/commit cycle is retried (with jittered
+ * backoff) up to USER_UPDATE_RETRIES times, so parallel updates never
+ * silently lose each other's changes (lost counters, dropped bans, ...).
+ *
+ * Returns the freshly persisted user, or null if the user no longer exists.
+ * Throws after exhausting retries on persistent contention.
+ */
+async function updateUserAtomic(
+ userId: string,
+ mutate: (user: User) => void,
+): Promise<User | null> {
+ const key = ["user", userId];
+ for (let attempt = 0; ; attempt++) {
+ const entry = await kv.get<User>(key);
+ if (!entry.value) return null;
+ const user = structuredClone(entry.value)!;
+ mutate(user);
+ const res = await kv.atomic()
+ .check({ key, versionstamp: entry.versionstamp })
+ .set(key, user)
+ .commit();
+ if (res.ok) return user;
+ if (attempt >= USER_UPDATE_RETRIES) {
+ throw new Error("Concurrent user update conflict, please retry");
+ }
+ await sleepJittered(attempt);
+ }
 }
 
 export async function getUserById(userId: string): Promise<User | null> {
@@ -189,18 +287,16 @@ export async function listUsers(limit = 100): Promise<User[]> {
 }
 
 export async function recordUserWin(userId: string): Promise<void> {
- const user = await getUserById(userId);
- if (!user) return;
+ await updateUserAtomic(userId, (user) => {
  user.wins = (user.wins || 0) + 1;
  user.matchesPlayed = (user.matchesPlayed || 0) + 1;
- await kv.set(["user", userId], user);
+ });
 }
 
 export async function recordUserMatch(userId: string): Promise<void> {
- const user = await getUserById(userId);
- if (!user) return;
+ await updateUserAtomic(userId, (user) => {
  user.matchesPlayed = (user.matchesPlayed || 0) + 1;
- await kv.set(["user", userId], user);
+ });
 }
 
 // ─── Account Lockout ─────────────────────────────────────────────────────────
@@ -220,20 +316,22 @@ export function getLockoutRemaining(user: User): number {
 }
 
 export async function recordFailedLogin(user: User): Promise<User> {
+ // Applied to a FRESH copy of the record inside an atomic transaction:
+ // concurrent failed logins can no longer overwrite each other's counts.
+ return (await updateUserAtomic(user.id, (fresh) => {
  // A lockout that already expired must not count toward the new attempt:
  // otherwise the stale counter (>= MAX_FAILED_ATTEMPTS) re-locks the
  // account on every single wrong password - a permanent 1-request/15min
  // DoS for anyone who knows the username.
- if (user.lockedUntil && user.lockedUntil < Date.now()) {
- user.failedLoginAttempts = 0;
- user.lockedUntil = null;
+ if (fresh.lockedUntil && fresh.lockedUntil < Date.now()) {
+ fresh.failedLoginAttempts = 0;
+ fresh.lockedUntil = null;
  }
- user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
- if (user.failedLoginAttempts >= MAX_FAILED_ATTEMPTS) {
- user.lockedUntil = Date.now() + LOCKOUT_DURATION_MS;
+ fresh.failedLoginAttempts = (fresh.failedLoginAttempts || 0) + 1;
+ if ((fresh.failedLoginAttempts || 0) >= MAX_FAILED_ATTEMPTS) {
+ fresh.lockedUntil = Date.now() + LOCKOUT_DURATION_MS;
  }
- await kv.set(["user", user.id], user);
- return user;
+ })) ?? user;
 }
 
 export async function recordSuccessfulLogin(user: User, ip: string): Promise<User> {
@@ -256,26 +354,28 @@ export async function banUser(
  if (targetUser.role === "admin") {
  throw new Error("Cannot ban an admin demote first");
  }
- targetUser.banned = true;
- targetUser.bannedAt = Date.now();
- targetUser.bannedReason = reason || "No reason provided";
- targetUser.bannedBy = adminUser.id;
- await kv.set(["user", targetUser.id], targetUser);
+ const updated = await updateUserAtomic(targetUser.id, (fresh) => {
+ fresh.banned = true;
+ fresh.bannedAt = Date.now();
+ fresh.bannedReason = reason || "No reason provided";
+ fresh.bannedBy = adminUser.id;
+ });
+ if (!updated) throw new Error("Target user no longer exists");
 
  await auditLog({
  action: "user-banned",
  actorId: adminUser.id,
  actorName: adminUser.username,
  actorIp: adminIp,
- targetId: targetUser.id,
- targetName: targetUser.username,
+ targetId: updated.id,
+ targetName: updated.username,
  details: reason,
  });
 
  // Revoke all sessions for this user
- await revokeAllUserSessions(targetUser.id);
+ await revokeAllUserSessions(updated.id);
 
- return targetUser;
+ return updated;
 }
 
 export async function unbanUser(
@@ -283,24 +383,26 @@ export async function unbanUser(
  adminUser: User,
  adminIp: string,
 ): Promise<User> {
- targetUser.banned = false;
- targetUser.bannedAt = null;
- targetUser.bannedReason = null;
- targetUser.bannedBy = null;
- targetUser.failedLoginAttempts = 0;
- targetUser.lockedUntil = null;
- await kv.set(["user", targetUser.id], targetUser);
+ const updated = await updateUserAtomic(targetUser.id, (fresh) => {
+ fresh.banned = false;
+ fresh.bannedAt = null;
+ fresh.bannedReason = null;
+ fresh.bannedBy = null;
+ fresh.failedLoginAttempts = 0;
+ fresh.lockedUntil = null;
+ });
+ if (!updated) throw new Error("Target user no longer exists");
 
  await auditLog({
  action: "user-unbanned",
  actorId: adminUser.id,
  actorName: adminUser.username,
  actorIp: adminIp,
- targetId: targetUser.id,
- targetName: targetUser.username,
+ targetId: updated.id,
+ targetName: updated.username,
  });
 
- return targetUser;
+ return updated;
 }
 
 export async function promoteToAdmin(
@@ -308,19 +410,21 @@ export async function promoteToAdmin(
  adminUser: User,
  adminIp: string,
 ): Promise<User> {
- targetUser.role = "admin";
- await kv.set(["user", targetUser.id], targetUser);
+ const updated = await updateUserAtomic(targetUser.id, (fresh) => {
+ fresh.role = "admin";
+ });
+ if (!updated) throw new Error("Target user no longer exists");
 
  await auditLog({
  action: "user-promoted-admin",
  actorId: adminUser.id,
  actorName: adminUser.username,
  actorIp: adminIp,
- targetId: targetUser.id,
- targetName: targetUser.username,
+ targetId: updated.id,
+ targetName: updated.username,
  });
 
- return targetUser;
+ return updated;
 }
 
 export async function demoteFromAdmin(
@@ -331,19 +435,21 @@ export async function demoteFromAdmin(
  if (targetUser.id === adminUser.id) {
  throw new Error("Cannot demote yourself");
  }
- targetUser.role = "user";
- await kv.set(["user", targetUser.id], targetUser);
+ const updated = await updateUserAtomic(targetUser.id, (fresh) => {
+ fresh.role = "user";
+ });
+ if (!updated) throw new Error("Target user no longer exists");
 
  await auditLog({
  action: "user-demoted-admin",
  actorId: adminUser.id,
  actorName: adminUser.username,
  actorIp: adminIp,
- targetId: targetUser.id,
- targetName: targetUser.username,
+ targetId: updated.id,
+ targetName: updated.username,
  });
 
- return targetUser;
+ return updated;
 }
 
 export async function deleteUser(
@@ -453,7 +559,14 @@ export function clearSessionCookie(): string {
 }
 
 function isSecureContext(): boolean {
- // On Deno Deploy (https) we want Secure flag; locally (http) we don't
+ // Explicit override takes precedence: SECURE_COOKIES=1/true forces the
+ // Secure flag on, SECURE_COOKIES=0/false forces it off (e.g. plain http
+ // behind a TLS-terminating proxy).
+ const override = Deno.env.get("SECURE_COOKIES")?.toLowerCase().trim();
+ if (override === "1" || override === "true") return true;
+ if (override === "0" || override === "false") return false;
+ // Default behavior: on Deno Deploy (https) we want Secure flag;
+ // locally (http) we don't
  return Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
 }
 

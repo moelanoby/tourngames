@@ -17,16 +17,16 @@
  * - Signups: reserve slots in signup-type lobbies
  */
 
-import * as auth from "./ui/auth.js?v=20260924f";
-import * as fb from "./ui/firebase.js?v=20260924f";
-import * as lobbies from "./ui/lobbies.js?v=20260924f";
-import * as admin from "./ui/admin.js?v=20260924f";
+import * as auth from "./ui/auth.js?v=20260924g";
+import * as fb from "./ui/firebase.js?v=20260924g";
+import * as lobbies from "./ui/lobbies.js?v=20260924g";
+import * as admin from "./ui/admin.js?v=20260924g";
 import {
  saveLocalReplay,
  loadLocalReplays,
  renameLocalReplay,
-} from "./ui/local-archive.js?v=20260924f";
-import * as cookies from "./ui/cookies.js?v=20260924f";
+} from "./ui/local-archive.js?v=20260924g";
+import * as cookies from "./ui/cookies.js?v=20260924g";
 
 // ─── Polyfills ───────────────────────────────────────────────────────────────
 
@@ -192,6 +192,9 @@ function generateName() {
 function initPlayer() {
  // Cookies first (survive localStorage clears), localStorage as fallback.
  const stored = { id: cookies.restore("tgn_playerId"), name: cookies.restore("tgn_playerName") };
+ if (!stored.name) {
+ try { stored.name = localStorage.getItem("tgn_playerName"); } catch { /* storage blocked */ }
+ }
  if (!stored.id) stored.id = generateId();
  state.playerId = stored.id;
 
@@ -326,6 +329,8 @@ function showToast(message, type) {
 function showLoading(text) {
  dom.loadingText.textContent = text || "loading...";
  dom.loadingBar.style.width = "0%";
+ // Invalidate any pending hideLoading timeout from a previous operation.
+ dom.loadingOverlay._hideToken = (dom.loadingOverlay._hideToken || 0) + 1;
  dom.loadingOverlay.classList.remove("hidden");
  dom.loadingOverlay.style.display = "flex";
  dom.loadingOverlay._startTime = Date.now();
@@ -351,7 +356,12 @@ function hideLoading() {
  dom.loadingBar.style.width = p + "%";
  if (p >= 100) clearInterval(finishInterval);
  }, 30);
+ // Token guard: a showLoading() inside the 500ms hide window bumps the
+ // token, so this stale timeout must not hide the freshly shown overlay.
+ const token = (dom.loadingOverlay._hideToken =
+ (dom.loadingOverlay._hideToken || 0) + 1);
  setTimeout(() => {
+ if (dom.loadingOverlay._hideToken !== token) return;
  dom.loadingOverlay.classList.add("hidden");
  dom.loadingOverlay.style.display = "none";
  dom.loadingBar.style.width = "0%";
@@ -442,16 +452,11 @@ function createSignalingSocket(onMessage) {
   const mockSocket = {
     readyState: WebSocket.OPEN,
     send: (data) => {
-      // Firebase handles message routing via sendSignal/toast
-      // Parse and handle locally
-      try {
-        const msg = JSON.parse(data);
-        onMessage(msg);
-        return true;
-      } catch (e) {
-        console.warn("Signal parse error:", e);
-        return false;
-      }
+      // Firebase handles signaling via database listeners, so outbound
+      // messages are simply accepted - they are NOT echoed back into
+      // onMessage (that fed every heartbeat/list-lobbies/poll-signals
+      // straight into handleSignalingMessage as unknown noise).
+      return true;
     },
     close: () => {
       console.log("[Firebase] Signaling disconnected");
@@ -459,12 +464,17 @@ function createSignalingSocket(onMessage) {
     _handlers: { open: [], message: [], close: [], error: [] }
   };
 
-  // Simulate open event
+  // Simulate open event asynchronously. Callers attach via the onopen
+  // property (and _handlers), so fire both forms.
   setTimeout(() => {
     if (mockSocket._handlers.open) {
       mockSocket._handlers.open.forEach(h => h());
     }
-  }, 10);
+    if (typeof mockSocket.onopen === "function") {
+      try { mockSocket.onopen(); } catch (e) { console.warn("[WS] onopen handler failed:", e); }
+    }
+  }, 0);
+
 
   return mockSocket;
 }
@@ -641,13 +651,13 @@ class P2PClient {
  _relayMessage(destId, originalMessage, hops, viaPeerId) {
  if (hops > this.maxRelayHops) {
  console.warn(`[P2P] Max relay hops exceeded for ${destId.slice(0, 8)}`);
- return;
+ return false;
  }
  // Try direct first
  const dc = this.channels.get(destId);
  if (dc && dc.readyState === "open") {
  dc.send(JSON.stringify(originalMessage));
- return;
+ return true;
  }
  // Find a relay peer (any connected peer that isn't the sender)
  for (const [pid, relayDc] of this.channels) {
@@ -661,10 +671,11 @@ class P2PClient {
  },
  }));
  console.log(`[P2P] Relaying to ${destId.slice(0, 8)} via ${pid.slice(0, 8)} (hops: ${hops})`);
- return;
+ return true;
  }
  }
  console.warn(`[P2P] No relay path to ${destId.slice(0, 8)}`);
+ return false;
  }
 
  async connectToPeer(peerId) {
@@ -691,6 +702,19 @@ class P2PClient {
  this.channels.set(from, dc);
  };
  try {
+  // Perfect negotiation: full mesh means both peers of a pair may dial
+  // each other at once ("glare"). The peer with the lexicographically
+  // smaller id is polite and rolls back its own offer; the impolite peer
+  // keeps its offer and ignores the incoming one.
+  const polite = this.localPlayerId < from;
+  if (pc.signalingState === "have-local-offer") {
+  if (!polite) {
+  console.log("[P2P] glare with", from.slice(0, 8), "- ignoring offer (impolite)");
+  return;
+  }
+  console.log("[P2P] glare with", from.slice(0, 8), "- rolling back (polite)");
+  await pc.setLocalDescription({ type: "rollback" });
+  }
  await pc.setRemoteDescription(offer);
  const answer = await pc.createAnswer();
  await pc.setLocalDescription(answer);
@@ -751,9 +775,11 @@ class P2PClient {
  dc.send(JSON.stringify(message));
  anySent = true;
  } else {
- // Try mesh relay for this peer
- this._relayMessage(peerId, message, 0, this.localPlayerId);
- anySent = true; // assume relay will eventually deliver
+ // Mesh relay counts as sent only when a relay path was actually
+ // found - otherwise callers can detect total delivery failure.
+ if (this._relayMessage(peerId, message, 0, this.localPlayerId)) {
+ anySent = true;
+ }
  }
  }
  return anySent;
@@ -789,7 +815,7 @@ class GameManager {
 
  async loadGameModule(gameModulePath) {
  showLoading("Loading game module...");
- const mod = await import("./" + gameModulePath + "?v=20260924f");
+ const mod = await import("./" + gameModulePath + "?v=20260924g");
  this.module = mod.default || mod;
  return this.module;
  }
@@ -816,18 +842,25 @@ class GameManager {
  fb.clearLobbyGame(state.currentLobbyId).catch(() => {});
  if (this.lobbyInputsUnsub) { try { this.lobbyInputsUnsub(); } catch {} }
  const lobbyId = state.currentLobbyId;
- this.lobbyInputsUnsub = fb.onLobbyInputs(lobbyId, (inputs) => {
- // Feed each relayed input into the host simulation, then delete it
- // so it isn't processed twice on the next snapshot.
- let consumed = false;
- for (const [pid, input] of Object.entries(inputs)) {
- if (!input || !state.players.some((p) => p.id === pid)) continue;
- if (pid === state.playerId) { fb.clearLobbyInput(lobbyId, pid).catch(() => {}); continue; }
- this.pendingInputs[pid] = input;
- consumed = true;
- fb.clearLobbyInput(lobbyId, pid).catch(() => {});
- }
- });
+  this.lobbyInputsUnsub = fb.onLobbyInputs(lobbyId, (inputs, keysByPid) => {
+  // Feed each relayed input into the host simulation, then delete
+  // exactly the child keys we consumed, so a newer input written during
+  // consumption survives for the next snapshot.
+  let consumed = false;
+  for (const [pid, input] of Object.entries(inputs)) {
+  const keys = keysByPid && keysByPid[pid];
+  if (!input || !state.players.some((p) => p.id === pid)) {
+  // Unknown/stale player: consume anyway so relayed rows cannot
+  // accumulate forever and re-deliver every snapshot.
+  fb.clearLobbyInput(lobbyId, pid, keys).catch(() => {});
+  continue;
+  }
+  if (pid === state.playerId) { fb.clearLobbyInput(lobbyId, pid, keys).catch(() => {}); continue; }
+  this.pendingInputs[pid] = input; // last write wins
+  consumed = true;
+  fb.clearLobbyInput(lobbyId, pid, keys).catch(() => {});
+  }
+  });
  }
 
  for (const p of state.players) {
@@ -885,8 +918,13 @@ class GameManager {
  return;
  }
 
- // Safety cap (chess games can be long 200 ticks at 500ms = 100 seconds)
- const maxTicks = this.module.metadata?.maxTicks || 3600;
+  // Safety cap: derive from the lobby's configured match time instead of a
+  // hard-coded tick count (3600 ticks at the default ~16.67ms rate ended
+  // fast games after ~60s regardless of matchTimeMin). matchTimeMin -1
+  // means unlimited - no cap.
+  const matchTimeMin = state.gameSettings?.matchTimeMin ?? 10;
+  const maxTicks = this.module.metadata?.maxTicks ||
+  (matchTimeMin < 0 ? Infinity : Math.ceil((matchTimeMin * 60000) / dt) + 600);
  if (this.tick > maxTicks) {
  this._endMatch();
  }
@@ -1189,6 +1227,10 @@ class GameManager {
  state.gameStarted = false;
  // Stop heartbeat and close P2P connections
  stopHeartbeat();
+ if (state.p2pFallbackTimer) {
+ clearTimeout(state.p2pFallbackTimer);
+ state.p2pFallbackTimer = null;
+ }
  if (state.p2pClient) {
  state.p2pClient.closeAll();
  state.p2pClient = null;
@@ -1203,14 +1245,18 @@ const gameMgr = new GameManager();
 function handlePlaySoloClick() {
  dom.findMatchScreen.classList.add("hidden");
  dom.gameScreen.classList.remove("hidden");
- dom.playerInfo.textContent = state.playerName + " · solo mode";
 
- state.playerId = state.playerName;
+ // Display name only - never clobber state.playerId. It is the persisted
+ // local id that online lobbies and input routing key on; overwriting it
+ // with the display name corrupted every subsequent online flow.
+ const soloName = state.playerName || "Player";
+ dom.playerInfo.textContent = soloName + " · solo mode";
+
  state.seed = Math.floor(Math.random() * 0x7fffffff);
- state.hostId = state.playerName;
+ state.hostId = state.playerId;
  state.isHost = true;
  state.players = [
- { id: state.playerName, name: state.playerName, connected: true },
+ { id: state.playerId, name: soloName, connected: true },
  { id: "bot-1", name: "Bot 1", connected: true },
  { id: "bot-2", name: "Bot 2", connected: true },
  ];
@@ -1258,8 +1304,10 @@ async function fetchQuickLobbies() {
   const list = document.getElementById("quick-lobby-list");
   if (!list) return;
   try {
-    // Use Firebase lobby list instead of server API
-    const lobbies = knownLobbies || [];
+    // One-shot Firebase read of open (non-private) waiting lobbies.
+    // The old code referenced `knownLobbies`, a private in ui/lobbies.js
+    // that was never imported here - every call threw a ReferenceError.
+    const lobbies = await fb.listPublicLobbies();
     renderQuickLobbies(lobbies);
   } catch (e) {
     console.warn("Failed to render lobbies:", e);
@@ -1278,13 +1326,15 @@ function renderQuickLobbies(lobbyList) {
  list.innerHTML = "";
  for (const lobby of lobbyList) {
  if (lobby.status !== "waiting") continue;
- if (lobby.playerCount >= lobby.maxPlayers) continue;
+ // Lobbies store players[], not playerCount - fall back defensively.
+ const playerCount = lobby.players?.length ?? lobby.playerCount ?? 0;
+ if (playerCount >= (lobby.maxPlayers || 10)) continue;
  const div = document.createElement("div");
  div.className = "list-item list-item-hover";
  div.innerHTML =
  '<div class="flex-1">' +
  '<div class="font-semibold">' + escapeHTML(lobby.name) + '</div>' +
- '<div class="text-sm muted mono">' + escapeHTML(lobby.hostName) + ' · ' + lobby.playerCount + '/' + lobby.maxPlayers + ' players</div>' +
+ '<div class="text-sm muted mono">' + escapeHTML(lobby.hostName) + ' · ' + playerCount + '/' + (lobby.maxPlayers || 10) + ' players</div>' +
  '</div>' +
  '<button class="btn btn-primary btn-sm">Join</button>';
  const btn = div.querySelector("button");
@@ -1586,6 +1636,15 @@ window.addEventListener("tgn:joined-lobby", (e) => {
 
 function handleLobbyStateUpdate(lobby, iceConfig) {
  if (!lobby) return;
+ // Adopt the Firebase uid as our player id as soon as we attach to the
+ // lobby. hostId/players are auth uids while state.playerId starts as a
+ // local cookie UUID - without this, isHost below computes false for the
+ // real host and "Start match" stays hidden until game start.
+ const myUid = fb.getCurrentUser()?.uid;
+ if (myUid && Array.isArray(lobby.players) &&
+     lobby.players.some((p) => p === myUid || p?.id === myUid)) {
+ state.playerId = myUid;
+ }
  state.currentLobbyId = lobby.id;
  state.players = lobby.players;
  state.hostId = lobby.hostId;
@@ -1842,6 +1901,12 @@ function subscribeToRelayChat() {
  for (const msg of messages || []) {
  if (!msg || seenChatIds.has(msg.id)) continue;
  seenChatIds.add(msg.id);
+ // Cap the dedup set so it cannot grow for the lifetime of the tab.
+ if (seenChatIds.size > 500) {
+ const keep = [...seenChatIds].slice(-250);
+ seenChatIds.clear();
+ keep.forEach((id) => seenChatIds.add(id));
+ }
  // Skip our own messages - already displayed optimistically on send.
  if (msg.from === (fb.getCurrentUser() || {}).uid) continue;
  displayChatMessage(msg.fromName, msg.message, msg.channel, msg.senderTeam);
@@ -1939,13 +2004,19 @@ function updateGameSidebar(gameState) {
  phaseEl.textContent = data.phase === "voting" ? "Voting phase" : "Executing...";
  }
  if (timerEl) {
+ // Legacy/corrupt relay states can lack phaseDeadline/timestamp -
+ // render a placeholder instead of "NaNs".
+ if (Number.isFinite(data.phaseDeadline) && Number.isFinite(gameState.timestamp)) {
  const remaining = Math.max(0, Math.ceil((data.phaseDeadline - gameState.timestamp) / 1000));
  timerEl.textContent = remaining + "s";
  timerEl.className = remaining <= 5 ? "badge badge-danger" : "badge badge-accent";
+ } else {
+ timerEl.textContent = "--";
+ timerEl.className = "badge badge-accent";
+ }
  timerEl.style.fontSize = "14px";
  timerEl.style.padding = "4px 10px";
  }
-
  // Update vote panel only when proposals/votes change
  const totalVotes = Object.keys(data.playerVotes || {}).length;
  if (data.proposals.length === lastProposalCount && totalVotes === lastVoteCount && data.turn === lastTurn) return;
@@ -2076,6 +2147,17 @@ function setupP2P() {
  // Host waits for incoming offers from clients
  console.log("[P2P] Host waiting for offers...");
  } else {
+ // Safety net: if the mesh hasn't connected within P2P_TIMEOUT_MS,
+ // make sure the Firebase state mirror is attached so relay-only
+ // clients still receive the game (subscribeToFirebaseState is
+ // idempotent).
+ state.p2pFallbackTimer = setTimeout(() => {
+ state.p2pFallbackTimer = null;
+ if (!state.p2pConnected && state.gameStarted && !state.matchEnded) {
+ console.info("[P2P] no mesh within", P2P_TIMEOUT_MS, "ms - relying on Firebase mirror");
+ gameMgr.subscribeToFirebaseState();
+ }
+ }, P2P_TIMEOUT_MS);
  // Each client connects to ALL other peers (full mesh) for robust routing.
  // The host connection is the most important (for game state).
  p2p.connectToPeer(state.hostId).catch(e => {
@@ -2225,7 +2307,7 @@ async function playReplay(replay) {
  } else {
  // Same specifier as loadGameModule() - a mismatched URL would evaluate
  // the module twice, splitting its mutable state (pendingInput etc.).
- const imported = await import("./" + gameModulePath + "?v=20260924f");
+ const imported = await import("./" + gameModulePath + "?v=20260924g");
  mod = imported.default || imported;
  }
  } catch (e) {

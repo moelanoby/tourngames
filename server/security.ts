@@ -43,8 +43,28 @@ export interface RateLimitResult {
  retryAfter: number; // seconds until reset, for HTTP Retry-After header
 }
 
+// Memory-growth guard: spoofed XFF headers used to be able to mint unlimited
+// unique bucket keys. Cap the map and evict when it grows past the limit.
+const MAX_RATE_BUCKETS = 10000;
+
+function capRateBuckets(now: number): void {
+ if (rateBuckets.size <= MAX_RATE_BUCKETS) return;
+ // First drop expired entries.
+ for (const [key, bucket] of rateBuckets) {
+ if (bucket.resetAt < now) rateBuckets.delete(key);
+ }
+ if (rateBuckets.size > MAX_RATE_BUCKETS) {
+ // Map preserves insertion order, so the first half is the oldest.
+ const keys = [...rateBuckets.keys()];
+ for (let i = 0; i < Math.floor(keys.length / 2); i++) {
+ rateBuckets.delete(keys[i]!);
+ }
+ }
+}
+
 export function rateLimit(key: string, limit: number, windowMs: number): RateLimitResult {
  const now = Date.now();
+ capRateBuckets(now);
  const bucket = rateBuckets.get(key);
  if (!bucket || bucket.resetAt < now) {
  const resetAt = now + windowMs;
@@ -88,13 +108,31 @@ export function rateLimitSignup(userId: string): RateLimitResult {
 
 // ─── Client IP ───────────────────────────────────────────────────────────────
 
+/**
+ * Extract the best-guess client IP.
+ *
+ * Trust order:
+ * 1. Platform-injected headers (Fly-Client-Ip, CF-Connecting-IP) — set by the
+ * edge proxy from the actual socket peer, not client-supplied.
+ * 2. The LAST entry of X-Forwarded-For — the hop appended by our own trusted
+ * proxy. Earlier entries are attacker-controlled (a spoofed XFF header is
+ * preserved as-is by append-style proxies). Parsing is capped at 10 entries
+ * so absurdly long headers cannot burn CPU/memory.
+ * 3. X-Real-IP (commonly set by nginx from $remote_addr).
+ */
 export function getClientIp(req: Request): string {
- const forwarded = req.headers.get("x-forwarded-for");
- if (forwarded) return forwarded.split(",")[0]?.trim() || "unknown";
- const realIp = req.headers.get("x-real-ip");
- if (realIp) return realIp.trim();
+ const flyIp = req.headers.get("fly-client-ip");
+ if (flyIp) return flyIp.trim();
  const cfIp = req.headers.get("cf-connecting-ip");
  if (cfIp) return cfIp.trim();
+ const forwarded = req.headers.get("x-forwarded-for");
+ if (forwarded) {
+ const hops = forwarded.split(",").map((s) => s.trim()).filter(Boolean).slice(-10);
+ const last = hops[hops.length - 1];
+ if (last) return last;
+ }
+ const realIp = req.headers.get("x-real-ip");
+ if (realIp) return realIp.trim();
  return "unknown";
 }
 
@@ -116,7 +154,7 @@ export const SECURITY_HEADERS: Record<string, string> = {
  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
  "font-src 'self' https://fonts.gstatic.com",
  "img-src 'self' data: https:",
- "connect-src 'self' wss: ws:",
+ "connect-src 'self'",
  "frame-ancestors 'none'",
  "form-action 'self'",
  "base-uri 'self'",
@@ -159,6 +197,24 @@ export function validateCSRFToken(sessionToken: string, csrfToken: string): bool
  let diff = 0;
  for (let i = 0; i < entry.token.length; i++) {
  diff |= entry.token.charCodeAt(i) ^ csrfToken.charCodeAt(i);
+ }
+ return diff === 0;
+}
+
+/**
+ * Constant-time CSRF token comparison for callers that already hold the
+ * session's expected token (e.g. the KV-backed `session.csrfToken` persisted
+ * at session creation). Unlike {@link validateCSRFToken}, this does not depend
+ * on the per-isolate in-memory Map, so it works across restarts and on
+ * multi-isolate deployments.
+ */
+export function csrfMatches(received: string | null | undefined, expected: string | null | undefined): boolean {
+ if (!received || !expected) return false;
+ // Length pre-check leaks nothing: tokens are fixed-length hex.
+ if (expected.length !== received.length) return false;
+ let diff = 0;
+ for (let i = 0; i < expected.length; i++) {
+ diff |= expected.charCodeAt(i) ^ received.charCodeAt(i);
  }
  return diff === 0;
 }

@@ -37,7 +37,8 @@ import {
  listLobbies,
  resetLobbyToWaiting,
 } from "./lobbies.ts";
-import { listAuditLogs, validateCSRFToken, getClientIp, auditLog } from "./security.ts";
+import { listAuditLogs, validateCSRFToken, getClientIp, auditLog, applySecurityHeaders } from "./security.ts";
+import { closeUserConnections } from "./signaling.ts";
 
 function json(data: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
  const headers: Record<string, string> = {
@@ -45,7 +46,7 @@ function json(data: unknown, status = 200, extraHeaders?: Record<string, string>
  "Cache-Control": "no-store",
  };
  if (extraHeaders) Object.assign(headers, extraHeaders);
- return new Response(JSON.stringify(data), { status, headers });
+ return applySecurityHeaders(new Response(JSON.stringify(data), { status, headers }));
 }
 
 async function readJsonBody(req: Request): Promise<any> {
@@ -111,8 +112,10 @@ export async function handleAdminApi(
  // ── Audit Log ──
  if (action === "audit" && req.method === "GET") {
  const url = new URL(req.url);
- const limit = parseInt(url.searchParams.get("limit") || "100", 10);
- const logs = await listAuditLogs(Math.min(500, limit));
+ const parsed = parseInt(url.searchParams.get("limit") || "100", 10);
+ // NaN → default; clamp to [0, 500] so negatives can't hit kv.list.
+ const limit = Number.isNaN(parsed) ? 100 : Math.max(0, Math.min(500, parsed));
+ const logs = await listAuditLogs(limit);
  return json({ logs });
  }
 
@@ -133,6 +136,10 @@ export async function handleAdminApi(
  const reason = (body?.reason || "").toString().slice(0, 200);
  try {
  const updated = await banUser(targetUser, admin, reason, adminIp);
+ // Drop any live WebSocket sessions: the ban must not wait for the
+ // socket to close naturally before taking effect.
+ const kicked = closeUserConnections(targetUser.id);
+ if (kicked > 0) console.log(`[Admin] Kicked ${kicked} live session(s) of banned user ${targetUser.id}`);
  return json({ user: adminUserView(updated) });
  } catch (e: any) {
  return json({ error: e?.message || "Failed to ban user" }, 400);

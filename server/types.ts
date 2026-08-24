@@ -34,6 +34,10 @@ export interface Lobby {
  createdAt: number;
  status: LobbyStatus;
  p2pReadyCount: number;
+ /** Per-player idempotent p2p-ready flags (playerId -> true). */
+ p2pReady?: Record<string, boolean>;
+ /** Set once match-over stats have been recorded for the current match. */
+ resultRecorded?: boolean;
  type: LobbyType;
  maxPlayers: number;
  minPlayers: number;

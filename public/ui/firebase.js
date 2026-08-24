@@ -205,20 +205,30 @@ export async function createLobby(lobbyData) {
   return lobby;
 }
 
-export async function joinLobby(lobbyId) {
+export async function joinLobby(lobbyId, opts = {}) {
   if (!initialized) initFirebase();
   const lobbyRef = ref(db, `lobbies/${lobbyId}`);
 
   // Atomic read-modify-write: a get()-then-update() race let two concurrent
   // joins clobber each other's players array, and capacity was never
   // enforced here. runTransaction serializes both.
+  let codeRejected = false;
   const { committed, snapshot } = await runTransaction(lobbyRef, (lobby) => {
-    if (!lobby || typeof lobby !== "object") return null; // abort: gone
-    if (lobby.status !== "waiting") return null;
+    // IMPORTANT: return undefined (NOT null) to abort - a returned null
+    // is a valid write that would DELETE the whole lobby node.
+    if (!lobby || typeof lobby !== "object") return undefined; // abort: gone
+    if (lobby.status !== "waiting") return undefined;
+    // Private lobbies are only joinable with the correct invite code
+    // (checked inside the transaction so the check and the join are
+    // atomic against concurrent updates).
+    if (lobby.type === "private" && opts?.inviteCode !== lobby.inviteCode) {
+      codeRejected = true;
+      return undefined;
+    }
     const players = Array.isArray(lobby.players) ? lobby.players : [];
     if (!players.includes(currentUser.uid)) {
       const max = Number.isFinite(lobby.maxPlayers) ? lobby.maxPlayers : 20;
-      if (players.length >= max) return null; // full
+      if (players.length >= max) return undefined; // full
     }
     return {
       ...lobby,
@@ -234,10 +244,11 @@ export async function joinLobby(lobbyId) {
   });
 
   const lobby = snapshot.val();
-  if (!lobby) throw new Error("Lobby not found");
 
   if (!committed) {
     // Transaction aborted: distinguish why for the caller.
+    if (codeRejected) throw new Error("Invalid invite code");
+    if (!lobby) throw new Error("Lobby not found");
     if (lobby.status !== "waiting") throw new Error("Lobby not joinable");
     const players = Array.isArray(lobby.players) ? lobby.players : [];
     if (!players.includes(currentUser.uid)) throw new Error("Lobby is full");
@@ -455,11 +466,29 @@ export function onLobbyListChange(callback) {
   onValue(q, (snapshot) => {
     const lobbies = [];
     snapshot.forEach((child) => {
-      lobbies.push(child.val());
+      // Private lobbies are invite-only - never expose them in the
+      // public listing (join still requires the invite code).
+      const val = child.val();
+      if (val && val.type === "private") return;
+      lobbies.push(val);
     });
     callback(lobbies);
   });
   return () => off(q);
+}
+
+/** One-shot read of open (non-private) waiting lobbies for quick panels. */
+export async function listPublicLobbies() {
+  if (!initialized) initFirebase();
+  const q = query(ref(db, "lobbies"), orderByChild("status"), equalTo("waiting"));
+  const snapshot = await get(q);
+  const lobbies = [];
+  snapshot.forEach((child) => {
+    const val = child.val();
+    if (val && val.type === "private") return;
+    lobbies.push(val);
+  });
+  return lobbies;
 }
 
 /** One-shot lobby read (used by the polling fallback for match start). */
@@ -565,24 +594,64 @@ export async function saveGameState(lobbyId, gameState) {
 /** Client -> host input relay for players whose P2P channel failed. */
 export async function writeLobbyInput(lobbyId, playerId, input) {
   if (!initialized) initFirebase();
-  await set(ref(db, `games/${lobbyId}/inputs/${playerId}`), input);
+  // Each input is push()-ed as a unique child under inputs/{pid} instead of
+  // overwriting a single key. The host deletes exactly the child keys it
+  // consumed, so an input written while it is consuming can no longer be
+  // silently removed before being processed.
+  await set(push(ref(db, `games/${lobbyId}/inputs/${playerId}`)), input);
 }
 
-/** Host: live feed of relayed inputs keyed by player id. */
+/**
+ * Host: live feed of relayed inputs keyed by player id.
+ * Callback shape stays {pid: input}: when a player has several queued
+ * inputs, the one with the newest push key wins ("last wins", matching
+ * the previous overwrite semantics). The second argument maps pid to the
+ * exact child keys backing the delivered inputs, so the host can delete
+ * only what it actually consumed.
+ */
 export function onLobbyInputs(lobbyId, callback) {
   if (!initialized) initFirebase();
   const inputsRef = ref(db, `games/${lobbyId}/inputs`);
   return onValue(inputsRef, (snapshot) => {
     const inputs = {};
-    snapshot.forEach((child) => { inputs[child.key] = child.val(); });
-    callback(inputs);
+    const keysByPid = {};
+    snapshot.forEach((pidChild) => {
+      let lastKey = null;
+      let lastVal = null;
+      const seenKeys = [];
+      pidChild.forEach((inputChild) => {
+        // Push keys sort chronologically; deliver the newest non-null entry.
+        if (inputChild.val() !== null) {
+          seenKeys.push(inputChild.key);
+          lastKey = inputChild.key;
+          lastVal = inputChild.val();
+        }
+      });
+      if (lastKey !== null) {
+        inputs[pidChild.key] = lastVal;
+        // Delete EVERY key we just observed: otherwise an older push left
+        // behind would be re-delivered (out of order) on the next snapshot.
+        keysByPid[pidChild.key] = seenKeys;
+      }
+    });
+    callback(inputs, keysByPid);
   });
 }
 
-/** Host: remove a consumed relayed input so it isn't reprocessed. */
-export async function clearLobbyInput(lobbyId, playerId) {
+/**
+ * Host: remove a consumed relayed input so it isn't reprocessed.
+ * With childKeys, deletes exactly those pushed input children (multi-path
+ * update - no newer unconsumed input is touched). Without them, removes
+ * everything queued for that player (legacy single-key callers).
+ */
+export async function clearLobbyInput(lobbyId, playerId, childKeys) {
   if (!initialized) initFirebase();
-  await remove(ref(db, `games/${lobbyId}/inputs/${playerId}`));
+  const pidRef = ref(db, `games/${lobbyId}/inputs/${playerId}`);
+  if (Array.isArray(childKeys) && childKeys.length > 0) {
+    await update(pidRef, Object.fromEntries(childKeys.map((k) => [k, null])));
+  } else {
+    await remove(pidRef);
+  }
 }
 
 /** Host: publish the match result so non-P2P clients see it too. */

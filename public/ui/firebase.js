@@ -580,8 +580,18 @@ export function onGameState(lobbyId, callback) {
   if (!initialized) initFirebase();
   const gameRef = ref(db, `games/${lobbyId}/state`);
   onValue(gameRef, (snapshot) => {
-    if (snapshot.exists()) {
-      callback(snapshot.val());
+    if (!snapshot.exists()) return;
+    const val = snapshot.val();
+    try {
+      // New format: { json: <base64> }. Legacy plain objects pass through
+      // but are usually RTDB-corrupted; receiveState rejects those.
+      if (val && typeof val.json === "string") {
+        callback(JSON.parse(decodeURIComponent(escape(atob(val.json)))));
+      } else {
+        callback(val);
+      }
+    } catch (e) {
+      console.warn("[Firebase] state decode failed:", e);
     }
   });
   return () => off(gameRef);

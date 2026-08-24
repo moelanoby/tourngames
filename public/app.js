@@ -1000,8 +1000,13 @@ class GameManager {
  }
 
  receiveState(newState, tick) {
+ // Reject anything that isn't a complete game state (legacy RTDB-mangled
+ // nodes had proposals/board stripped by the database).
+ if (!newState || !newState.data || !Array.isArray(newState.data.board)) return;
+ newState.data.proposals = newState.data.proposals || [];
+ newState.data.playerVotes = newState.data.playerVotes || {};
  this.state = newState;
- this.tick = tick;
+ this.tick = tick || newState.tick || 0;
  }
 
  /**

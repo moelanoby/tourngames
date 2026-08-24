@@ -453,6 +453,18 @@ function executeTopMove(state) {
  if (capturedPiece) {
  data.lastCaptureTick = state.tick;
  data.lastCaptureType = capturedPiece.type;
+ // Full capture ledger. pieceAssignments only tracks OWNED pieces, but most
+ // of the 32 pieces are unowned when players < pieces - without this ledger
+ // those captures vanish from the record entirely.
+ if (!Array.isArray(data.captureHistory)) data.captureHistory = [];
+ data.captureHistory.push({
+ type: capturedPiece.type,
+ color: capturedPiece.color,
+ ownerId: capturedPiece.playerId || null,
+ square: [tr, tc],
+ byTeam: data.turn,
+ tick: state.tick,
+ });
  }
 
  // Check king capture

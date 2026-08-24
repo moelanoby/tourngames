@@ -15,16 +15,8 @@ import {
   leaveLobby as fbLeaveLobby,
   onLobbyListChange,
   onLobbyChange,
-  sendSignal,
-  onSignal,
-  sendChatMessage,
-  onChatMessages,
-  saveGameState,
   getCurrentUser,
-  updatePresence,
-  sendLobbyMessage,
-  onLobbyMessages,
-} from "./firebase.js?v=20260924h";
+} from "./firebase.js?v=20260925a";
 
 const dom = {};
 let currentLobbyId = null;
@@ -36,7 +28,7 @@ let unsubLobby = null;
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
-export function init(opts = {}) {
+export function init(_opts = {}) {
   cacheDom();
   bindEvents();
   updateNamePlaceholder();
@@ -55,8 +47,6 @@ function cacheDom() {
   dom.createType = document.getElementById("create-type");
   dom.createMin = document.getElementById("create-min");
   dom.createMax = document.getElementById("create-max");
-  dom.createVotingTime = document.getElementById("create-voting-time");
-  dom.createMatchTime = document.getElementById("create-match-time");
   dom.detailTimerSection = document.getElementById("detail-timer-section");
   dom.detailVotingTime = document.getElementById("detail-voting-time");
   dom.detailMatchTime = document.getElementById("detail-match-time");
@@ -117,10 +107,21 @@ function bindEvents() {
   if (dom.detailSaveTimersBtn) {
     dom.detailSaveTimersBtn.addEventListener("click", handleSaveTimers);
   }
-  // Sweep dead lobbies now and every 5 minutes so they don't pile up.
-  const sweep = () => { cleanupStaleLobbies().catch(() => {}); };
+  // Sweep dead lobbies on load and whenever the tab becomes visible
+  // again (instead of a fixed timer) so they don't pile up.
+  let lastSweep = 0;
+  const sweep = () => {
+    lastSweep = Date.now();
+    cleanupStaleLobbies().catch(() => {});
+  };
   sweep();
-  setInterval(sweep, 5 * 60 * 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    // Re-render immediately from cached data, then throttle the Firebase
+    // sweep to at most once per minute per visibility change.
+    renderLobbyList(knownLobbies);
+    if (Date.now() - lastSweep > 60 * 1000) sweep();
+  });
   if (dom.detailStartMatchBtn) {
     dom.detailStartMatchBtn.addEventListener("click", handleStartMatch);
   }
@@ -169,8 +170,8 @@ export function renderLobbyList(list) {
     dom.list.innerHTML = `
       <div class="text-center py-16 text-muted">
         <div class="text-4xl mb-4">🎮</div>
-        <p class="font-mono">NO OPEN LOBBIES</p>
-        <p class="text-sm mt-2">Create one above to get started.</p>
+        <p class="font-mono">No lobbies yet - make one!</p>
+        <p class="text-sm mt-2">Use the "+ Create new" button above to open your own table.</p>
       </div>
     `;
     return;
@@ -178,13 +179,17 @@ export function renderLobbyList(list) {
 
   dom.list.innerHTML = "";
   for (const lobby of knownLobbies) {
-    const card = document.createElement("div");
-    card.className =
-      "card p-4 cursor-pointer group transition-all duration-200 " +
-      "hover:border-gold hover:shadow-lg hover:shadow-yellow-500/5";
-
     const isFull = (lobby.players?.length || 0) >= (lobby.maxPlayers || 10);
     const isPlaying = lobby.status === "playing" || lobby.status === "starting";
+    // Full or in-progress lobbies are not joinable: render them dimmed and
+    // non-clickable so the card state matches what the detail view allows.
+    const joinable = !isFull && !isPlaying;
+    const card = document.createElement("div");
+    card.className = joinable
+      ? "card p-4 cursor-pointer group transition-all duration-200 " +
+        "hover:border-gold hover:shadow-lg hover:shadow-yellow-500/5"
+      : "card p-4 opacity-60 cursor-not-allowed transition-all duration-200";
+
     const playerCount = lobby.players?.length || 0;
     const typeBadge = lobby.type === "signup"
       ? `<span class="badge badge-signup">SIGNUP</span>`
@@ -210,14 +215,19 @@ export function renderLobbyList(list) {
         </div>
         <div class="text-right">
           ${isPlaying
-            ? `<span class="text-xs text-danger font-mono">in progress</span>`
+            ? `<span class="text-xs text-danger font-mono">IN PROGRESS</span>`
             : isFull
             ? `<span class="text-xs text-muted font-mono">FULL</span>`
             : `<span class="text-xs text-ok font-mono">OPEN</span>`}
         </div>
       </div>
     `;
-    card.addEventListener("click", () => showDetail(lobby.id));
+    if (joinable) {
+      card.addEventListener("click", () => showDetail(lobby.id));
+    } else {
+      card.setAttribute("aria-disabled", "true");
+      card.title = isPlaying ? "Match already started" : "Lobby is full";
+    }
     dom.list.appendChild(card);
   }
 }

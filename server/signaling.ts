@@ -23,9 +23,8 @@ import {
  startLobbyMatch,
  resetLobbyToWaiting,
  listLobbies,
- generateId,
 } from "./lobbies.ts";
-import { getUserById, recordUserWin, recordUserMatch } from "./auth.ts";
+import { recordUserWin, recordUserMatch } from "./auth.ts";
 import { rateLimit, sanitizeString, sanitizeLobbyName, auditLog } from "./security.ts";
 import {
  registerPeer,
@@ -48,6 +47,34 @@ export interface ConnectionInfo {
 
 const connections = new Map<string, ConnectionInfo>();
 
+/** Last inbound-message timestamp per connection, used by the idle sweeper. */
+const lastActivityAt = new Map<string, number>();
+
+/** Close WS connections idle longer than this (clients send `heartbeat`). */
+export const WS_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Close every WebSocket idle past {@link WS_IDLE_TIMEOUT_MS}.
+ * Called by the sweeper interval started in mod.ts when the first socket
+ * opens (lazy start keeps the module import side-effect free for tests).
+ * Returns the number of connections closed.
+ */
+export function sweepIdleConnections(now = Date.now()): number {
+ let closed = 0;
+ for (const [pid, info] of connections.entries()) {
+ const last = lastActivityAt.get(pid) ?? now;
+ if (now - last > WS_IDLE_TIMEOUT_MS) {
+ try {
+ info.ws.close(1001, "Idle timeout");
+ } catch { /* already closing */ }
+ lastActivityAt.delete(pid);
+ connections.delete(pid);
+ closed++;
+ }
+ }
+ return closed;
+}
+
 // Match-over integrity state (see "match-over" case): lobbies whose current
 // match result was already recorded, and pending reset timers per lobby id.
 const recordedMatches = new Set<string>();
@@ -65,6 +92,7 @@ export function closeUserConnections(userId: string, code = 4003, reason = "Acco
  try {
  info.ws.close(code, reason);
  } catch { /* already closing */ }
+ lastActivityAt.delete(pid);
  connections.delete(pid);
  closed++;
  }
@@ -72,11 +100,7 @@ export function closeUserConnections(userId: string, code = 4003, reason = "Acco
  return closed;
 }
 
-export function getConnection(playerId: string): ConnectionInfo | undefined {
- return connections.get(playerId);
-}
-
-export function listConnectionsInLobby(lobbyId: string): ConnectionInfo[] {
+function listConnectionsInLobby(lobbyId: string): ConnectionInfo[] {
  const out: ConnectionInfo[] = [];
  for (const info of connections.values()) {
  if (info.lobbyId === lobbyId) out.push(info);
@@ -84,7 +108,7 @@ export function listConnectionsInLobby(lobbyId: string): ConnectionInfo[] {
  return out;
 }
 
-export function removeConnection(playerId: string): void {
+function removeConnection(playerId: string): void {
  connections.delete(playerId);
 }
 
@@ -95,7 +119,12 @@ export function removeConnection(playerId: string): void {
 
 function buildIceConfig() {
  // Small list on purpose: 5+ STUN/TURN servers slow discovery in Chrome.
- const iceServers: any[] = [
+ interface IceServer {
+ urls: string;
+ username?: string;
+ credential?: string;
+ }
+ const iceServers: IceServer[] = [
  { urls: "stun:stun.l.google.com:19302" },
  ];
 
@@ -150,11 +179,17 @@ export interface HandleContext {
  username: string | null;
 }
 
+/** Record inbound activity for a connection (idle sweeper input). */
+export function touchConnection(playerId: string): void {
+ lastActivityAt.set(playerId, Date.now());
+}
+
 export async function handleWebSocketMessage(
  ws: WebSocket,
  ctx: HandleContext,
  raw: unknown,
 ): Promise<void> {
+ touchConnection(ctx.playerId);
  // ── Rate limit: 60 msg/sec, 300 msg/10sec per connection ──
  const rlSec = rateLimit(`ws-msg:${ctx.playerId}`, 60, 1000);
  if (!rlSec.ok) {
@@ -167,6 +202,7 @@ export async function handleWebSocketMessage(
  return;
  }
 
+ // deno-lint-ignore no-explicit-any -- wire messages are dynamically validated below
  let msg: any;
  try {
  msg = JSON.parse(typeof raw === "string" ? raw : "");
@@ -295,8 +331,6 @@ export async function handleWebSocketMessage(
  iceConfig: ICE_CONFIG,
  });
  await broadcastLobbyList();
- // Auto-start if min players reached (for open/private lobbies)
- await checkAutoStart(lobby.id);
  break;
  }
 
@@ -349,8 +383,6 @@ export async function handleWebSocketMessage(
  iceConfig: ICE_CONFIG,
  });
  await broadcastLobbyList();
- // Auto-start if min players reached (for open/private lobbies)
- await checkAutoStart(lobby.id);
  break;
  }
 
@@ -579,6 +611,9 @@ async function leaveLobby(playerId: string): Promise<void> {
 // ─── Broadcast Helpers ───────────────────────────────────────────────────────
 
 async function broadcastLobbyState(lobbyId: string, payload: unknown): Promise<void> {
+ // Await a microtask tick so the contract stays async for callers that
+ // sequence broadcasts between KV writes.
+ await Promise.resolve();
  const conns = listConnectionsInLobby(lobbyId);
  for (const c of conns) safeSend(c.ws, payload);
 }
@@ -617,20 +652,11 @@ function lobbySummary(lobby: Lobby) {
  };
 }
 
-// ─── Auto-Start Watcher ──────────────────────────────────────────────────────
-// DISABLED: The host must manually click "Start match" to begin the game.
-// This function is kept for compatibility but does nothing the host
-// controls when the match starts via the "start-match" WebSocket message.
-
-export async function checkAutoStart(lobbyId: string): Promise<void> {
- // No-op host must manually start the match
- return;
-}
-
 // ─── Connection Cleanup ──────────────────────────────────────────────────────
 
 export async function handleWebSocketClose(playerId: string): Promise<void> {
  await leaveLobby(playerId);
+ lastActivityAt.delete(playerId);
  removeConnection(playerId);
  await broadcastLobbyList();
 }

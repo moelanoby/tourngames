@@ -5,7 +5,7 @@
  * Backed by Deno KV.
  */
 
-import type { Lobby, PlayerSession, SignupEntry, LobbyType, LobbyID, PlayerID, UserID } from "./types.ts";
+import type { Lobby, PlayerSession, SignupEntry, LobbyType, PlayerID, UserID } from "./types.ts";
 
 const kv = await Deno.openKv();
 const LOBBY_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
@@ -272,7 +272,7 @@ export async function addPlayerToLobby(
  lobby: Lobby,
  player: PlayerSession,
 ): Promise<{ ok: boolean; reason?: string; lobby: Lobby }> {
- return mutateLobbyAtomically(lobby, (fresh) => {
+ return await mutateLobbyAtomically(lobby, (fresh) => {
  // Null-safe: ensure players array exists (old lobby entries may not have it)
  if (!Array.isArray(fresh.players)) fresh.players = [];
  if (!Array.isArray(fresh.signups)) fresh.signups = [];
@@ -362,7 +362,7 @@ export async function removeSignup(lobby: Lobby, userId: UserID): Promise<Lobby>
 // ─── Match Start ─────────────────────────────────────────────────────────────
 
 export async function startLobbyMatch(lobby: Lobby): Promise<{ ok: boolean; reason?: string; lobby: Lobby }> {
- return mutateLobbyAtomically(lobby, (fresh) => {
+ return await mutateLobbyAtomically(lobby, (fresh) => {
  if (!Array.isArray(fresh.players)) fresh.players = [];
  if (fresh.status !== "waiting") {
  return { ok: false, reason: "Lobby is not in waiting state", write: false };
@@ -384,17 +384,6 @@ export async function startLobbyMatch(lobby: Lobby): Promise<{ ok: boolean; reas
  });
 }
 
-export async function endLobbyMatch(lobbyId: string): Promise<void> {
- const lobby = await getLobby(lobbyId);
- if (!lobby) return;
- lobby.status = "ended";
- lobby.players = [];
- lobby.hostId = null;
- lobby.p2pReadyCount = 0;
- await updateLobby(lobby);
- // Auto-delete ended lobbies after a short delay (caller can do this)
-}
-
 export async function resetLobbyToWaiting(lobbyId: string): Promise<Lobby | null> {
  const lobby = await getLobby(lobbyId);
  if (!lobby) return null;
@@ -407,5 +396,3 @@ export async function resetLobbyToWaiting(lobbyId: string): Promise<Lobby | null
  });
  return result.lobby;
 }
-
-export { generateId, generateSeed, generateInviteCode, LOBBY_TIMEOUT_MS };

@@ -18,16 +18,16 @@
  * - Signups: reserve slots in signup-type lobbies
  */
 
-import * as auth from "./ui/auth.js?v=20260924h";
-import * as fb from "./ui/firebase.js?v=20260924h";
-import * as lobbies from "./ui/lobbies.js?v=20260924h";
-import * as admin from "./ui/admin.js?v=20260924h";
+import * as auth from "./ui/auth.js?v=20260925a";
+import * as fb from "./ui/firebase.js?v=20260925a";
+import * as lobbies from "./ui/lobbies.js?v=20260925a";
+import * as admin from "./ui/admin.js?v=20260925a";
 import {
  saveLocalReplay,
  loadLocalReplays,
  renameLocalReplay,
-} from "./ui/local-archive.js?v=20260924h";
-import * as cookies from "./ui/cookies.js?v=20260924h";
+} from "./ui/local-archive.js?v=20260925a";
+import * as cookies from "./ui/cookies.js?v=20260925a";
 
 // ─── Polyfills ───────────────────────────────────────────────────────────────
 
@@ -128,6 +128,10 @@ const dom = {
  loadingText: document.getElementById("loading-text"),
  playerInfo: document.getElementById("player-info"),
  toastContainer: document.getElementById("toast-container"),
+
+ // Rename modal
+ renameModal: document.getElementById("rename-modal"),
+ renameInput: document.getElementById("rename-input"),
 };
 
 // ─── App State ───────────────────────────────────────────────────────────────
@@ -180,14 +184,6 @@ function generateId() {
  return crypto.randomUUID();
  }
  return "player_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
-}
-
-function generateName() {
- const adjs = ["Swift", "Deadly", "Clever", "Fierce", "Sneaky", "Brave", "Cold", "Sharp"];
- const nouns = ["Hawk", "Fox", "Wolf", "Eagle", "Panther", "Raven", "Tiger", "Cobra"];
- return adjs[Math.floor(Math.random() * adjs.length)] + " " +
- nouns[Math.floor(Math.random() * nouns.length)] + " " +
- (Math.floor(Math.random() * 900) + 100);
 }
 
 function initPlayer() {
@@ -325,6 +321,34 @@ function showToast(message, type) {
  }, 4500);
 }
 
+// ─── Connection Status Indicator ─────────────────────────────────────────────
+
+const connStatus = {
+ root: document.getElementById("conn-status"),
+ dot: document.getElementById("conn-dot"),
+ text: document.getElementById("conn-text"),
+};
+
+/** Reflect signaling availability in the nav pill. mode: connected|reconnecting|offline */
+function setConnStatus(mode) {
+ if (!connStatus.root || !connStatus.dot || !connStatus.text) return;
+ const modes = {
+ connected: { color: "var(--success)", label: "Connected", title: "Connected to game services" },
+ reconnecting: { color: "var(--warning)", label: "Reconnecting...", title: "Connection interrupted - retrying" },
+ offline: { color: "var(--danger)", label: "Offline", title: "No connection to game services" },
+ };
+ const m = modes[mode] || modes.offline;
+ connStatus.dot.style.background = m.color;
+ connStatus.text.textContent = m.label;
+ connStatus.root.title = m.title;
+}
+
+window.addEventListener("offline", () => setConnStatus("offline"));
+window.addEventListener("online", () => {
+ const open = state.signalingSocket && state.signalingSocket.readyState === WebSocket.OPEN;
+ setConnStatus(open ? "connected" : "reconnecting");
+});
+
 // ─── Loading Overlay ─────────────────────────────────────────────────────────
 
 function showLoading(text) {
@@ -443,16 +467,15 @@ function initRouter() {
 
 // ─=== Signaling Client (WebSocket) ══════════════════════════════════════════
 
-function createSignalingSocket(onMessage) {
+function createSignalingSocket(_onMessage) {
   // Firebase handles signaling automatically via database listeners
   // No WebSocket connection needed!
   state.websocketConnected = true;
-  console.log("[Firebase] Signaling initialized (no WebSocket needed)");
 
   // Return a mock socket object for compatibility
   const mockSocket = {
     readyState: WebSocket.OPEN,
-    send: (data) => {
+    send: () => {
       // Firebase handles signaling via database listeners, so outbound
       // messages are simply accepted - they are NOT echoed back into
       // onMessage (that fed every heartbeat/list-lobbies/poll-signals
@@ -460,7 +483,8 @@ function createSignalingSocket(onMessage) {
       return true;
     },
     close: () => {
-      console.log("[Firebase] Signaling disconnected");
+      state.websocketConnected = false;
+      setConnStatus("offline");
     },
     _handlers: { open: [], message: [], close: [], error: [] }
   };
@@ -468,6 +492,7 @@ function createSignalingSocket(onMessage) {
   // Simulate open event asynchronously. Callers attach via the onopen
   // property (and _handlers), so fire both forms.
   setTimeout(() => {
+    setConnStatus("connected");
     if (mockSocket._handlers.open) {
       mockSocket._handlers.open.forEach(h => h());
     }
@@ -492,7 +517,7 @@ function sendToServer(msg) {
 // All state-changing requests (POST/PUT/DELETE) must include the CSRF token.
 // This helper wraps fetch() to automatically add the header.
 
-async function fetchWithCSRF(url, options = {}) {
+function fetchWithCSRF(url, options = {}) {
  if (!options.method || options.method === "GET") {
  return fetch(url, { ...options, credentials: "include" });
  }
@@ -541,19 +566,14 @@ class P2PClient {
  };
 
  pc.oniceconnectionstatechange = () => {
- const st = pc.iceConnectionState;
- console.log(`[P2P] ${peerId.slice(0, 8)} ICE: ${st}`);
- if (st === "failed") {
- console.info(`[P2P] direct route to ${peerId.slice(0, 8)} unavailable - TURN/relay carries traffic`);
- // Mark this peer as needing relay
+ if (pc.iceConnectionState === "failed") {
+ // Mark this peer as needing relay - TURN/relay carries traffic.
  this._updateRoutingTable();
  }
  };
 
  pc.onconnectionstatechange = () => {
- const st = pc.connectionState;
- console.log(`[P2P] ${peerId.slice(0, 8)} state: ${st}`);
- if (st === "failed" || st === "disconnected") {
+ if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
  console.warn("[P2P] Connection issue for", peerId.slice(0, 8));
  this._updateRoutingTable();
  }
@@ -580,7 +600,6 @@ class P2PClient {
  };
 
  dc.onopen = () => {
- console.log("[P2P] Data channel open:", peerId.slice(0, 8));
  this.peerConnected.add(peerId);
  if (this.onPeerConnected) this.onPeerConnected(peerId);
  this._checkAllConnected();
@@ -590,7 +609,6 @@ class P2PClient {
  };
 
  dc.onclose = () => {
- console.log("[P2P] Data channel closed:", peerId.slice(0, 8));
  this.peerConnected.delete(peerId);
  this._updateRoutingTable();
  };
@@ -671,7 +689,6 @@ class P2PClient {
  hops: hops,
  },
  }));
- console.log(`[P2P] Relaying to ${destId.slice(0, 8)} via ${pid.slice(0, 8)} (hops: ${hops})`);
  return true;
  }
  }
@@ -710,10 +727,8 @@ class P2PClient {
   const polite = this.localPlayerId < from;
   if (pc.signalingState === "have-local-offer") {
   if (!polite) {
-  console.log("[P2P] glare with", from.slice(0, 8), "- ignoring offer (impolite)");
   return;
   }
-  console.log("[P2P] glare with", from.slice(0, 8), "- rolling back (polite)");
   await pc.setLocalDescription({ type: "rollback" });
   }
  await pc.setRemoteDescription(offer);
@@ -758,7 +773,6 @@ class P2PClient {
  return true;
  }
  // Direct failed try mesh routing
- console.log(`[P2P] Direct send to ${peerId.slice(0, 8)} failed, trying mesh relay...`);
  this._relayMessage(peerId, message, 0, this.localPlayerId);
  return false; // return false so callers know direct send failed
  }
@@ -816,7 +830,7 @@ class GameManager {
 
  async loadGameModule(gameModulePath) {
  showLoading("Loading game module...");
- const mod = await import("./" + gameModulePath + "?v=20260924h");
+ const mod = await import("./" + gameModulePath + "?v=20260925a");
  this.module = mod.default || mod;
  return this.module;
  }
@@ -847,7 +861,6 @@ class GameManager {
   // Feed each relayed input into the host simulation, then delete
   // exactly the child keys we consumed, so a newer input written during
   // consumption survives for the next snapshot.
-  let consumed = false;
   for (const [pid, input] of Object.entries(inputs)) {
   const keys = keysByPid && keysByPid[pid];
   if (!input || !state.players.some((p) => p.id === pid)) {
@@ -858,7 +871,6 @@ class GameManager {
   }
   if (pid === state.playerId) { fb.clearLobbyInput(lobbyId, pid, keys).catch(() => {}); continue; }
   this.pendingInputs[pid] = input; // last write wins
-  consumed = true;
   fb.clearLobbyInput(lobbyId, pid, keys).catch(() => {});
   }
   });
@@ -880,7 +892,6 @@ class GameManager {
  if (!this.renderFrameId) this._renderLoop();
 
  state.gameStarted = true;
- console.log("[GameManager] Host game started. tick rate:", tickRate);
  }
 
  _hostTick() {
@@ -954,6 +965,7 @@ class GameManager {
  this.gameInterval = null;
  }
 
+ disarmLeaveGuard();
  state.matchEnded = true;
  const winnerId = this.module.getWinner(this.state);
  const winnerName = state.players.find(p => p.id === winnerId)?.name || "Unknown";
@@ -1100,6 +1112,7 @@ class GameManager {
 
  receiveMatchOver(winnerId, winnerName) {
  if (state.matchEnded) return;
+ disarmLeaveGuard();
  state.matchEnded = true;
  this.showResults(winnerId, winnerName, this.state?.timestamp || 0);
  }
@@ -1119,7 +1132,7 @@ class GameManager {
  state.eliminated = false;
  }
 
- showResults(winnerId, winnerName, duration) {
+ showResults(_winnerId, winnerName, _duration) {
  if (state.eliminated) {
  const existing = document.getElementById("winner-info");
  if (existing) existing.remove();
@@ -1226,6 +1239,7 @@ class GameManager {
  state.matchEnded = false;
  state.p2pConnected = false;
  state.gameStarted = false;
+ disarmLeaveGuard();
  // Stop heartbeat and close P2P connections
  stopHeartbeat();
  if (state.p2pFallbackTimer) {
@@ -1270,6 +1284,7 @@ function handlePlaySoloClick() {
  closeAll: () => {},
  };
 
+ armLeaveGuard();
  gameMgr.startHostGame();
 }
 
@@ -1288,7 +1303,6 @@ function handleFindMatchClick() {
  state.signalingSocket = createSignalingSocket(handleSignalingMessage);
  state.signalingSocket.onopen = () => {
  state.websocketConnected = true;
- console.log("[WS] Connected, waiting for assign-id");
  // Request lobby list once connected
  sendToServer({ type: "list-lobbies" });
  };
@@ -1311,7 +1325,9 @@ async function fetchQuickLobbies() {
     const lobbies = await fb.listPublicLobbies();
     renderQuickLobbies(lobbies);
   } catch (e) {
-    console.warn("Failed to render lobbies:", e);
+    console.warn("Failed to load lobbies:", e);
+    list.innerHTML = '<p class="subtle text-sm" style="padding: 24px; text-align: center;">Could not load lobbies.</p>';
+    showToast("Could not load lobbies", "error");
   }
 }
 
@@ -1345,6 +1361,7 @@ function renderQuickLobbies(lobbyList) {
  showToast("Log in to join a lobby", "error");
  return;
  }
+ btn.disabled = true;
  try {
  const joined = await fb.joinLobby(lobby.id);
  showToast("Joined lobby!", "success");
@@ -1353,6 +1370,8 @@ function renderQuickLobbies(lobbyList) {
  window.location.hash = "#/game";
  } catch (e) {
  showToast(e.message, "error");
+ } finally {
+ btn.disabled = false;
  }
  });
  list.appendChild(div);
@@ -1471,7 +1490,6 @@ function handleSignalingMessage(msg) {
  }
  // Don't restart the game it already started on game-start.
  // Just mark P2P as connected so we prefer it for future state relays.
- console.log("[P2P] All peers connected (server-confirmed).");
  }
  break;
 
@@ -1496,7 +1514,6 @@ function handleSignalingMessage(msg) {
  case "signals": {
  if (msg.signals && state.p2pClient) {
  for (const sig of msg.signals) {
- console.log(`[P2P] Processing stored ${sig.type} from ${sig.fromId.slice(0, 8)}`);
  if (sig.type === "offer") {
  state.p2pClient.handleOffer(sig.fromId, sig.data);
  } else if (sig.type === "answer") {
@@ -1514,7 +1531,7 @@ function handleSignalingMessage(msg) {
  break;
 
  case "match-over-ack":
- console.log("[Server] match-over recorded");
+ // Server recorded the result; nothing to do.
  break;
 
  case "error":
@@ -1530,7 +1547,7 @@ function handleSignalingMessage(msg) {
  break;
 
  case "replay-ack":
- console.log("[Replay] saved:", msg.replayId);
+ // Replay storage is local-only; nothing to do.
  break;
 
  default:
@@ -1713,7 +1730,7 @@ function handleLobbyStateUpdate(lobby, iceConfig) {
 function renderLobby() {
  const container = dom.playerList;
  container.innerHTML = "";
- state.players.forEach((p, i) => {
+ state.players.forEach((p) => {
  const isHost = p.id === state.hostId;
  const isYou = p.id === state.playerId;
  const dotColor = isHost ? "bg-gold" : "bg-ok";
@@ -1770,6 +1787,7 @@ function handleGameStart(msg) {
  // Mark the game as started for EVERYONE (clients too - the Firebase
   // state mirror and match-over listeners are gated on this flag).
  state.gameStarted = true;
+ armLeaveGuard();
 
  // Show game-screen immediately on game-start.
  dom.lobbyWait.classList.add("hidden");
@@ -1813,6 +1831,23 @@ function stopHeartbeat() {
  clearInterval(heartbeatInterval);
  heartbeatInterval = null;
  }
+}
+
+// ─── Leave Guard (active match only) ─────────────────────────────────────────
+// Ask before closing/reloading the tab ONLY while a match is live. The guard
+// is armed on match start and disarmed the moment the match ends or resets.
+
+function guardBeforeUnload(e) {
+ e.preventDefault();
+ e.returnValue = ""; // required for Chrome
+}
+
+function armLeaveGuard() {
+ window.addEventListener("beforeunload", guardBeforeUnload);
+}
+
+function disarmLeaveGuard() {
+ window.removeEventListener("beforeunload", guardBeforeUnload);
 }
 
 // ─── Chat (separate public + team) ───────────────────────────────────────────
@@ -1883,7 +1918,10 @@ function sendChat() {
  fb.sendLobbyMessage(state.currentLobbyId, message, {
  channel: currentChatChannel,
  senderTeam: team,
- }).catch((e) => console.warn("[Chat] relay failed:", e));
+ }).catch((e) => {
+ console.warn("[Chat] relay failed:", e);
+ showToast("Message failed to send", "error");
+ });
  } else {
  // No lobby (solo mode): just show it locally.
  displayChatMessage(state.playerName, message, currentChatChannel, team);
@@ -2098,7 +2136,7 @@ function listenForSignals() {
 function setupP2P() {
  const p2p = new P2PClient(state.playerId, state.hostId, state.players, state.iceConfig);
 
- p2p.onMessage = (peerId, msg) => {
+ p2p.onMessage = (_peerId, msg) => {
  // Chat messages: public goes to everyone, team only goes to same-team players
  if (msg.type === "chat") {
  if (msg.channel === "team") {
@@ -2128,15 +2166,13 @@ function setupP2P() {
  }
  };
 
- p2p.onPeerConnected = (peerId) => {
- console.log("[P2P] Peer connected:", peerId.slice(0, 8));
+ p2p.onPeerConnected = () => {
  if (!p2p.isHost) {
  sendToServer({ type: "p2p-ready" });
  }
  };
 
  p2p.onAllConnected = () => {
- console.log("[P2P] All peers connected full mesh established.");
  sendToServer({ type: "p2p-ready" });
  state.p2pConnected = true;
  };
@@ -2145,8 +2181,7 @@ function setupP2P() {
  listenForSignals();
 
  if (p2p.isHost) {
- // Host waits for incoming offers from clients
- console.log("[P2P] Host waiting for offers...");
+ // Host waits for incoming offers from clients.
  } else {
  // Safety net: if the mesh hasn't connected within P2P_TIMEOUT_MS,
  // make sure the Firebase state mirror is attached so relay-only
@@ -2155,15 +2190,13 @@ function setupP2P() {
  state.p2pFallbackTimer = setTimeout(() => {
  state.p2pFallbackTimer = null;
  if (!state.p2pConnected && state.gameStarted && !state.matchEnded) {
- console.info("[P2P] no mesh within", P2P_TIMEOUT_MS, "ms - relying on Firebase mirror");
  gameMgr.subscribeToFirebaseState();
  }
  }, P2P_TIMEOUT_MS);
  // Each client connects to ALL other peers (full mesh) for robust routing.
  // The host connection is the most important (for game state).
  p2p.connectToPeer(state.hostId).catch(e => {
- console.error("[P2P] connection error to host:", e);
- console.info("[P2P] could not reach peer directly - continuing in Firebase relay mode");
+ console.error("[P2P] connection error to host (continuing via Firebase relay):", e);
  });
  // Also connect to other non-host peers for mesh routing redundancy
  for (const player of state.players) {
@@ -2188,7 +2221,7 @@ function setupP2P() {
 // so they can be unit-tested via Deno. This file just contains the
 // archive UI rendering + the rename prompt flow.
 
-async function initArchive() {
+function initArchive() {
  // Read replays from localStorage. Each user only sees their own
  // matches  nothing is fetched from the server.
  const replays = loadLocalReplays();
@@ -2264,14 +2297,30 @@ async function initArchive() {
  });
 }
 
+let renameTarget = null; // replay being renamed while the modal is open
+
 /**
- * Prompt for a new title and update the local replay in-place.
+ * Open the inline rename modal; submitRename() applies the change.
  * No server round-trip  the rename is purely client-side.
  */
-async function handleRenameReplay(replayId, currentTitle) {
- const input = window.prompt("Rename this match:", currentTitle);
- if (input === null) return; // user cancelled
- const newTitle = String(input).trim().slice(0, 80);
+function handleRenameReplay(replayId, currentTitle) {
+ renameTarget = { replayId, currentTitle };
+ dom.renameModal.classList.remove("hidden");
+ dom.renameInput.value = currentTitle;
+ dom.renameInput.focus();
+ dom.renameInput.select();
+}
+
+function closeRenameModal() {
+ dom.renameModal.classList.add("hidden");
+ renameTarget = null;
+}
+
+function submitRename() {
+ if (!renameTarget) return;
+ const { replayId, currentTitle } = renameTarget;
+ closeRenameModal();
+ const newTitle = String(dom.renameInput.value).trim().slice(0, 80);
  if (newTitle.length === 0) {
  showToast("Title can't be empty", "error");
  return;
@@ -2308,7 +2357,7 @@ async function playReplay(replay) {
  } else {
  // Same specifier as loadGameModule() - a mismatched URL would evaluate
  // the module twice, splitting its mutable state (pendingInput etc.).
- const imported = await import("./" + gameModulePath + "?v=20260924h");
+ const imported = await import("./" + gameModulePath + "?v=20260925a");
  mod = imported.default || imported;
  }
  } catch (e) {
@@ -2386,7 +2435,6 @@ async function playReplay(replay) {
  playPauseBtn.textContent = "▶ PLAY";
  });
 
- let rafId = null;
  function render(timestamp) {
  // Stop the loop once the viewer canvas is removed from the DOM (new
  // playback or navigating away), instead of accumulating dead rAF loops.
@@ -2407,9 +2455,9 @@ async function playReplay(replay) {
  frameEl.isConnected && (frameEl.textContent = frame + 1);
  scrub.isConnected && (scrub.value = frame);
 
- rafId = requestAnimationFrame(render);
+ requestAnimationFrame(render);
  }
- rafId = requestAnimationFrame(render);
+ requestAnimationFrame(render);
 }
 
 function formatDuration(ms) {
@@ -2577,6 +2625,46 @@ async function main() {
  lobbies.openCreateForm();
  });
  }
+ // Rename modal (replaces the old window.prompt flow)
+ const renameForm = document.getElementById("rename-form");
+ const renameCloseBtn = document.getElementById("rename-modal-close");
+ if (renameForm) {
+ renameForm.addEventListener("submit", (e) => {
+ e.preventDefault();
+ submitRename();
+ });
+ }
+ if (renameCloseBtn) renameCloseBtn.addEventListener("click", closeRenameModal);
+ if (dom.renameModal) {
+ dom.renameModal.addEventListener("click", (e) => {
+ if (e.target === dom.renameModal) closeRenameModal(); // backdrop click
+ });
+ }
+
+ // Keyboard shortcut: Escape closes dialogs/overlays, then leaves any
+ // focused input (e.g. the lobby search). Chat Enter-to-send is wired
+ // below on the chat input itself. Documented in the footer hint.
+ window.addEventListener("keydown", (e) => {
+ if (e.key !== "Escape") return;
+ if (dom.renameModal && !dom.renameModal.classList.contains("hidden")) {
+ closeRenameModal();
+ e.preventDefault();
+ return;
+ }
+ const authModal = document.getElementById("auth-modal");
+ if (authModal && !authModal.classList.contains("hidden")) {
+ auth.hideModal();
+ e.preventDefault();
+ return;
+ }
+ const active = document.activeElement;
+ if (active && active !== document.body &&
+ (active.tagName === "INPUT" || active.tagName === "TEXTAREA" ||
+ active.tagName === "SELECT")) {
+ active.blur();
+ }
+ });
+
  dom.setUsernameBtn.addEventListener("click", setUsername);
  dom.usernameInput.addEventListener("keydown", (e) => {
  if (e.key === "Enter") setUsername();
@@ -2597,6 +2685,7 @@ async function main() {
  showToast("Not in a lobby", "error");
  return;
  }
+ dom.startMatchBtn.disabled = true; // prevent double-submit
  try {
  const lobby = await fb.startMatch(state.currentLobbyId);
  showToast("Starting match...", "info");
@@ -2604,23 +2693,24 @@ async function main() {
  if (lobby) startFirebaseMatch(lobby);
  } catch (e) {
  showToast(e.message, "error");
+ } finally {
+ if (!state.gameStarted) dom.startMatchBtn.disabled = false;
  }
  });
 
  // Copy invite link button
  const copyInviteBtn = document.getElementById("copy-invite-btn");
  if (copyInviteBtn) {
- copyInviteBtn.addEventListener("click", () => {
+ copyInviteBtn.addEventListener("click", async () => {
  const inviteLink = document.getElementById("lobby-invite-link");
- if (inviteLink) {
- inviteLink.select();
+ if (!inviteLink) return;
  try {
- navigator.clipboard.writeText(inviteLink.value);
+ await navigator.clipboard.writeText(inviteLink.value);
  showToast("Link copied! Share it with friends.", "success");
  } catch {
+ inviteLink.select();
  document.execCommand("copy");
  showToast("Link copied!", "success");
- }
  }
  });
  }

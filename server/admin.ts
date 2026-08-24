@@ -37,49 +37,29 @@ import {
  listLobbies,
  resetLobbyToWaiting,
 } from "./lobbies.ts";
-import { listAuditLogs, validateCSRFToken, getClientIp, auditLog, applySecurityHeaders } from "./security.ts";
+import {
+ listAuditLogs,
+ getClientIp,
+ auditLog,
+ jsonResponse,
+ jsonError,
+ readJsonBody,
+} from "./security.ts";
+
+/** Shared success-envelope helper (same shape mod.ts uses). */
+const json = jsonResponse;
+import { checkCSRF } from "./auth.ts";
 import { closeUserConnections } from "./signaling.ts";
-
-function json(data: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
- const headers: Record<string, string> = {
- "Content-Type": "application/json; charset=utf-8",
- "Cache-Control": "no-store",
- };
- if (extraHeaders) Object.assign(headers, extraHeaders);
- return applySecurityHeaders(new Response(JSON.stringify(data), { status, headers }));
-}
-
-async function readJsonBody(req: Request): Promise<any> {
- try {
- return await req.json();
- } catch {
- return null;
- }
-}
-
-function getSessionToken(req: Request): string | null {
- const cookies = req.headers.get("cookie") || "";
- const match = cookies.match(/tgn_session=([^;]+)/);
- return match ? match[1]! : null;
-}
-
-function checkCSRF(req: Request): boolean {
- const sessionToken = getSessionToken(req);
- if (!sessionToken) return false;
- const csrfToken = req.headers.get("x-csrf-token");
- if (!csrfToken) return false;
- return validateCSRFToken(sessionToken, csrfToken);
-}
 
 /** Returns the admin user if authorized, or a Response error if not. */
 async function requireAdmin(req: Request, auth: { user: User | null }): Promise<{ ok: true; admin: User & { role: "admin" } } | { ok: false; response: Response }> {
  if (!isAdmin(auth.user)) {
- return { ok: false, response: json({ error: "Forbidden admin access required" }, 403) };
+ return { ok: false, response: jsonError("Forbidden admin access required", 403) };
  }
  // For state-changing requests, validate CSRF
  if (req.method !== "GET") {
- if (!checkCSRF(req)) {
- return { ok: false, response: json({ error: "Invalid CSRF token" }, 403) };
+ if (!(await checkCSRF(req))) {
+ return { ok: false, response: jsonError("Invalid CSRF token", 403) };
  }
  }
  return { ok: true, admin: auth.user };
@@ -124,16 +104,18 @@ export async function handleAdminApi(
  // (the id is the last segment; there is no trailing sub-action).
  if (action.startsWith("users/")) {
  const parts = action.split("/");
- if (parts.length < 2) return json({ error: "Invalid path" }, 404);
+ if (parts.length < 2) return jsonError("Invalid path", 404);
  const userId = parts[1];
  const sub = parts[2] ?? "";
 
  const targetUser = await getUserById(userId!);
- if (!targetUser) return json({ error: "User not found" }, 404);
+ if (!targetUser) return jsonError("User not found", 404);
 
  if (sub === "ban" && req.method === "POST") {
- const body = await readJsonBody(req);
- const reason = (body?.reason || "").toString().slice(0, 200);
+ const bodyRes = await readJsonBody(req);
+ const reason = bodyRes.ok
+ ? String((bodyRes.body as { reason?: unknown }).reason ?? "").slice(0, 200)
+ : "";
  try {
  const updated = await banUser(targetUser, admin, reason, adminIp);
  // Drop any live WebSocket sessions: the ban must not wait for the
@@ -141,8 +123,9 @@ export async function handleAdminApi(
  const kicked = closeUserConnections(targetUser.id);
  if (kicked > 0) console.log(`[Admin] Kicked ${kicked} live session(s) of banned user ${targetUser.id}`);
  return json({ user: adminUserView(updated) });
- } catch (e: any) {
- return json({ error: e?.message || "Failed to ban user" }, 400);
+ } catch (e) {
+ const msg = e instanceof Error ? e.message : "Failed to ban user";
+ return jsonError(msg, 400);
  }
  }
 
@@ -150,8 +133,9 @@ export async function handleAdminApi(
  try {
  const updated = await unbanUser(targetUser, admin, adminIp);
  return json({ user: adminUserView(updated) });
- } catch (e: any) {
- return json({ error: e?.message || "Failed to unban user" }, 400);
+ } catch (e) {
+ const msg = e instanceof Error ? e.message : "Failed to unban user";
+ return jsonError(msg, 400);
  }
  }
 
@@ -159,8 +143,9 @@ export async function handleAdminApi(
  try {
  const updated = await promoteToAdmin(targetUser, admin, adminIp);
  return json({ user: adminUserView(updated) });
- } catch (e: any) {
- return json({ error: e?.message || "Failed to promote user" }, 400);
+ } catch (e) {
+ const msg = e instanceof Error ? e.message : "Failed to promote user";
+ return jsonError(msg, 400);
  }
  }
 
@@ -168,8 +153,9 @@ export async function handleAdminApi(
  try {
  const updated = await demoteFromAdmin(targetUser, admin, adminIp);
  return json({ user: adminUserView(updated) });
- } catch (e: any) {
- return json({ error: e?.message || "Failed to demote user" }, 400);
+ } catch (e) {
+ const msg = e instanceof Error ? e.message : "Failed to demote user";
+ return jsonError(msg, 400);
  }
  }
 
@@ -178,8 +164,9 @@ export async function handleAdminApi(
  try {
  await deleteUser(targetUser, admin, adminIp);
  return json({ ok: true });
- } catch (e: any) {
- return json({ error: e?.message || "Failed to delete user" }, 400);
+ } catch (e) {
+ const msg = e instanceof Error ? e.message : "Failed to delete user";
+ return jsonError(msg, 400);
  }
  }
  }
@@ -187,12 +174,12 @@ export async function handleAdminApi(
  // ── Lobby actions: /api/admin/lobbies/:id/{end} ──
  if (action.startsWith("lobbies/")) {
  const parts = action.split("/");
- if (parts.length < 2) return json({ error: "Invalid path" }, 404);
+ if (parts.length < 2) return jsonError("Invalid path", 404);
  const lobbyId = parts[1];
  const sub = parts[2] || "";
 
  const lobby = await getLobby(lobbyId!);
- if (!lobby) return json({ error: "Lobby not found" }, 404);
+ if (!lobby) return jsonError("Lobby not found", 404);
 
  if (sub === "" && req.method === "DELETE") {
  await deleteLobby(lobbyId!);
@@ -221,5 +208,5 @@ export async function handleAdminApi(
  }
  }
 
- return json({ error: "Not found" }, 404);
+ return jsonError("Not found", 404);
 }

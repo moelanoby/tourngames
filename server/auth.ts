@@ -13,8 +13,8 @@
  * - Session cookies: HttpOnly, SameSite=Strict
  */
 
-import type { User, Session, AuthState, UserRole } from "./types.ts";
-import { generateCSRFToken, auditLog } from "./security.ts";
+import type { User, Session, AuthState } from "./types.ts";
+import { generateCSRFToken, auditLog, validateCSRFToken, csrfMatches, jsonError, parseCookies } from "./security.ts";
 
 const PBKDF2_ITERATIONS = 100_000;
 const SALT_LENGTH = 16;
@@ -537,18 +537,6 @@ async function revokeAllUserSessions(userId: string): Promise<void> {
 
 // ─── HTTP Helpers ────────────────────────────────────────────────────────────
 
-export function parseCookies(cookieHeader: string | null): Record<string, string> {
- const out: Record<string, string> = {};
- if (!cookieHeader) return out;
- for (const part of cookieHeader.split(";")) {
- const idx = part.indexOf("=");
- if (idx === -1) continue;
- const key = part.slice(0, idx).trim();
- const val = part.slice(idx + 1).trim();
- out[key] = val;
- }
- return out;
-}
 
 export function setSessionCookie(token: string): string {
  return `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}${isSecureContext() ? "; Secure" : ""}`;
@@ -570,8 +558,37 @@ function isSecureContext(): boolean {
  return Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
 }
 
-export function getCookieName(): string {
- return COOKIE_NAME;
+/** Extract the session token cookie from a Request (strict cookie parse). */
+export function getSessionToken(req: Request): string | null {
+ return parseCookies(req.headers.get("cookie"))[COOKIE_NAME] ?? null;
+}
+
+/**
+ * Validate the CSRF token of a state-changing request.
+ * Fast path checks the per-isolate in-memory store; fallback compares against
+ * the KV-backed session's persisted token so requests landing on another
+ * isolate (or after a restart) are not spuriously rejected.
+ */
+export async function checkCSRF(req: Request): Promise<boolean> {
+ const sessionToken = getSessionToken(req);
+ if (!sessionToken) return false;
+ const csrfToken = req.headers.get("x-csrf-token");
+ if (!csrfToken) return false;
+ if (validateCSRFToken(sessionToken, csrfToken)) return true;
+ try {
+ const session = await getSession(sessionToken);
+ if (session && csrfMatches(csrfToken, session.csrfToken)) return true;
+ } catch { /* fall through */ }
+ return false;
+}
+
+/** Require CSRF for state-changing requests. Returns an error response if invalid. */
+export async function requireCSRF(req: Request): Promise<Response | null> {
+ if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return null;
+ if (!(await checkCSRF(req))) {
+ return jsonError("Invalid or missing CSRF token. Refresh the page and try again.", 403);
+ }
+ return null;
 }
 
 export async function getAuthState(req: Request): Promise<AuthState> {
@@ -642,3 +659,6 @@ export function adminUserView(u: User) {
  lastLoginIp: u.lastLoginIp || null,
  };
 }
+
+// Re-exported for callers that previously imported it from this module.
+export { parseCookies };

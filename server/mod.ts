@@ -34,7 +34,8 @@ import {
  recordSuccessfulLogin,
  isAccountLocked,
  getLockoutRemaining,
- parseCookies,
+ getSessionToken,
+ requireCSRF,
 } from "./auth.ts";
 import {
  createLobby,
@@ -44,36 +45,37 @@ import {
  removeSignup,
  purgeAllLobbies,
 } from "./lobbies.ts";
-// (Replays are now stored locally in the browser as of v0.4; the server's
-// old replays.ts module is dead code kept for archival reference, but
-// no endpoint imports from it anymore.)
+// (Replays are stored locally in the browser as of v0.4. The old replays.ts
+// module was dead code with zero importers and has been deleted; the HTTP
+// endpoints below remain as 410/legacy no-ops for old clients.)
 import {
  handleWebSocketMessage,
  handleWebSocketClose,
+ touchConnection,
+ sweepIdleConnections,
  connections,
- closeUserConnections,
  ICE_CONFIG,
 } from "./signaling.ts";
-import type { HandleContext } from "./signaling.ts";
-import type { LobbyType } from "./types.ts";
+import type { HandleContext, ConnectionInfo } from "./signaling.ts";
+import type { Lobby, LobbyType } from "./types.ts";
 import { handleAdminApi } from "./admin.ts";
 import {
  applySecurityHeaders,
  getClientIp,
+ jsonResponse as json,
+ jsonError,
+ readJsonBody,
  rateLimitLogin,
  rateLimitRegister,
  rateLimitApi,
  rateLimitLobbyCreate,
  rateLimitSignup,
- validateCSRFToken,
- csrfMatches,
  revokeCSRFToken,
  validatePasswordStrength,
  sanitizeString,
  sanitizeLobbyName,
  auditLog,
  isProfane,
- cleanProfanity,
 } from "./security.ts";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -105,7 +107,6 @@ const MIME_TYPES: Record<string, string> = {
 // Get the directory of the current module (server/mod.ts)
 const __dirname = new URL(".", import.meta.url).pathname;
 function resolveStaticPath(urlPath: string): string | null {
-  console.log("[DEBUG] resolveStaticPath:", urlPath);
   let p = urlPath.replace(/^\/+/, "");
   if (p.includes("..") || p.includes("\\")) return null;
   if (p === "" || p === "index.html") return new URL("public/index.html", import.meta.url).pathname;
@@ -118,9 +119,7 @@ function resolveStaticPath(urlPath: string): string | null {
 }
 
 async function serveStaticFile(urlPath: string): Promise<Response> {
-  console.log("[DEBUG] serveStaticFile called with:", urlPath);
  const filePath = resolveStaticPath(urlPath);
-  console.log("[DEBUG] resolveStaticPath returned:", filePath);
  if (!filePath) {
  return applySecurityHeaders(new Response("Forbidden", { status: 403 }));
  }
@@ -163,60 +162,22 @@ async function serveStaticFile(urlPath: string): Promise<Response> {
 }
 
 // ─── JSON Helpers ────────────────────────────────────────────────────────────
-
-function json(data: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
- const headers: Record<string, string> = {
- "Content-Type": "application/json; charset=utf-8",
- "Cache-Control": "no-store",
- };
- if (extraHeaders) Object.assign(headers, extraHeaders);
- return applySecurityHeaders(new Response(JSON.stringify(data), { status, headers }));
-}
+// jsonResponse / jsonError / readJsonBody / session-token + CSRF checks are
+// shared and live in security.ts and auth.ts so every handler answers with
+// one consistent envelope.
 
 function rateLimitedResponse(retryAfter: number): Response {
- return json({ error: "Too many requests. Please try again later." }, 429, {
+ return jsonError("Too many requests. Please try again later.", 429, {
  "Retry-After": String(retryAfter),
  });
 }
 
-async function readJsonBody(req: Request): Promise<any> {
- try {
- return await req.json();
- } catch {
- return null;
+/** Map a readJsonBody result to an error Response (400 invalid / 413 large). */
+function jsonBodyError(res: { ok: boolean; reason?: string }): Response {
+ if (!res.ok && res.reason === "too-large") {
+ return jsonError("Request body too large", 413);
  }
-}
-
-function getSessionToken(req: Request): string | null {
- // Strict cookie parse: a regex on the raw header would match substrings
- // of other cookies (e.g. "xtgn_session").
- return parseCookies(req.headers.get("cookie"))["tgn_session"] ?? null;
-}
-
-async function checkCSRF(req: Request): Promise<boolean> {
- const sessionToken = getSessionToken(req);
- if (!sessionToken) return false;
- const csrfToken = req.headers.get("x-csrf-token");
- if (!csrfToken) return false;
- // Fast path: this isolate issued the token.
- if (validateCSRFToken(sessionToken, csrfToken)) return true;
- // Cross-isolate / post-restart path: compare (constant-time) against the
- // KV-backed session's persisted token, so a request landing on another
- // Deno Deploy isolate is not rejected with a spurious 403.
- try {
- const session = await getSession(sessionToken);
- if (session && csrfMatches(csrfToken, session.csrfToken)) return true;
- } catch { /* fall through */ }
- return false;
-}
-
-/** Require CSRF for state-changing requests. Returns error response if invalid. */
-async function requireCSRF(req: Request): Promise<Response | null> {
- if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return null;
- if (!(await checkCSRF(req))) {
- return json({ error: "Invalid or missing CSRF token. Refresh the page and try again." }, 403);
- }
- return null;
+ return jsonError("Invalid JSON", 400);
 }
 
 // ─── HTTP API: Auth ──────────────────────────────────────────────────────────
@@ -229,20 +190,21 @@ async function handleAuthApi(req: Request, action: string): Promise<Response> {
  const rl = rateLimitRegister(ip);
  if (!rl.ok) return rateLimitedResponse(rl.retryAfter);
 
- const body = await readJsonBody(req);
- if (!body) return json({ error: "Invalid JSON" }, 400);
+ const bodyRes = await readJsonBody(req);
+ if (!bodyRes.ok) return jsonBodyError(bodyRes);
+ const body = bodyRes.body;
  const username = sanitizeString(body.username, 16);
  const password = (body.password || "").toString();
  const uCheck = validateUsername(username);
- if (!uCheck.ok) return json({ error: uCheck.msg }, 400);
+ if (!uCheck.ok) return jsonError(uCheck.msg ?? "Invalid username", 400);
  // Server-side profanity check (uses bad-words npm + custom leetspeak filter)
  if (await isProfane(username)) {
- return json({ error: "Username contains inappropriate language" }, 400);
+ return jsonError("Username contains inappropriate language", 400);
  }
  const pCheck = validatePassword(password);
- if (!pCheck.ok) return json({ error: pCheck.msg }, 400);
+ if (!pCheck.ok) return jsonError(pCheck.msg ?? "Invalid password", 400);
  const strength = validatePasswordStrength(password);
- if (!strength.ok) return json({ error: strength.msg }, 400);
+ if (!strength.ok) return jsonError(strength.msg ?? "Password too weak", 400);
 
  try {
  const user = await createUser(username, password, ip);
@@ -253,15 +215,17 @@ async function handleAuthApi(req: Request, action: string): Promise<Response> {
  }, 200, {
  "Set-Cookie": setSessionCookie(session.token),
  });
- } catch (e: any) {
- return json({ error: String(e?.message || e) }, 400);
+ } catch (e) {
+ // Only forward the controlled validation message, never raw error internals.
+ return jsonError(e instanceof Error ? e.message : "Registration failed", 400);
  }
  }
 
  // ── Login ──
  if (action === "login" && req.method === "POST") {
- const body = await readJsonBody(req);
- if (!body) return json({ error: "Invalid JSON" }, 400);
+ const bodyRes = await readJsonBody(req);
+ if (!bodyRes.ok) return jsonBodyError(bodyRes);
+ const body = bodyRes.body;
  const username = sanitizeString(body.username, 16);
  const password = (body.password || "").toString();
 
@@ -270,7 +234,7 @@ async function handleAuthApi(req: Request, action: string): Promise<Response> {
 
  const user = await getUserByUsername(username);
  // Don't reveal whether user exists same error message
- if (!user) return json({ error: "Invalid username or password" }, 401);
+ if (!user) return jsonError("Invalid username or password", 401);
 
  // Check ban
  if (user.banned) {
@@ -281,13 +245,13 @@ async function handleAuthApi(req: Request, action: string): Promise<Response> {
  actorIp: ip,
  details: user.bannedReason || undefined,
  });
- return json({ error: "Account banned: " + (user.bannedReason || "No reason provided") }, 403);
+ return jsonError("Account banned: " + (user.bannedReason || "No reason provided"), 403);
  }
 
  // Check lockout
  if (isAccountLocked(user)) {
  const remaining = Math.ceil(getLockoutRemaining(user) / 1000);
- return json({ error: `Account locked. Try again in ${remaining} seconds.` }, 423);
+ return jsonError(`Account locked. Try again in ${remaining} seconds.`, 423);
  }
 
  const ok = await verifyPassword(password, user.passwordHash, user.passwordSalt);
@@ -302,9 +266,9 @@ async function handleAuthApi(req: Request, action: string): Promise<Response> {
  // Check if this failure triggered a lockout
  const updated = await getUserByUsername(username);
  if (updated && isAccountLocked(updated)) {
- return json({ error: "Too many failed attempts. Account locked for 15 minutes." }, 423);
+ return jsonError("Too many failed attempts. Account locked for 15 minutes.", 423);
  }
- return json({ error: "Invalid username or password" }, 401);
+ return jsonError("Invalid username or password", 401);
  }
 
  await recordSuccessfulLogin(user, ip);
@@ -366,33 +330,35 @@ async function handleAuthApi(req: Request, action: string): Promise<Response> {
  return json({ user: publicUser(auth.user), csrfToken }, 200);
  }
 
- return json({ error: "Not found" }, 404);
+ return jsonError("Not found", 404);
 }
 
 // ─── HTTP API: CSRF ──────────────────────────────────────────────────────────
 
 async function handleCsrfApi(req: Request): Promise<Response> {
- if (req.method !== "GET") return json({ error: "Method not allowed" }, 405);
+ if (req.method !== "GET") return jsonError("Method not allowed", 405);
  const auth = await getAuthState(req);
- if (!auth.user) return json({ error: "Not authenticated" }, 401);
+ if (!auth.user) return jsonError("Not authenticated", 401);
  const token = getSessionToken(req);
- if (!token) return json({ error: "No session" }, 401);
+ if (!token) return jsonError("No session", 401);
  const session = await getSession(token);
- if (!session) return json({ error: "Session expired" }, 401);
+ if (!session) return jsonError("Session expired", 401);
  return json({ csrfToken: session.csrfToken }, 200);
 }
 
 // ─── HTTP API: Lobbies ───────────────────────────────────────────────────────
 
-function lobbySummary(lobby: any) {
+function lobbySummary(lobby: Lobby) {
+ const players = Array.isArray(lobby.players) ? lobby.players : [];
+ const signups = Array.isArray(lobby.signups) ? lobby.signups : [];
  return {
  id: lobby.id,
  name: lobby.name,
  gameId: lobby.gameId,
  type: lobby.type,
  status: lobby.status,
- playerCount: lobby.players?.length || 0,
- signupCount: lobby.signups?.length || 0,
+ playerCount: players.length,
+ signupCount: signups.length,
  maxPlayers: lobby.maxPlayers,
  minPlayers: lobby.minPlayers,
  votingTimeMin: lobby.votingTimeMin ?? 0.25,
@@ -424,18 +390,19 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  if (csrfErr) return csrfErr;
 
  const auth = await getAuthState(req);
- if (auth.user?.banned) return json({ error: "Account banned" }, 403);
+ if (auth.user?.banned) return jsonError("Account banned", 403);
  if (auth.user) {
  const rl = rateLimitLobbyCreate(auth.user.id);
  if (!rl.ok) return rateLimitedResponse(rl.retryAfter);
  }
 
- const body = await readJsonBody(req);
- if (!body) return json({ error: "Invalid JSON" }, 400);
+ const bodyRes = await readJsonBody(req);
+ if (!bodyRes.ok) return jsonBodyError(bodyRes);
+ const body = bodyRes.body;
  const lobbyName = sanitizeLobbyName(body.name) || "Untitled Lobby";
  // Profanity check on lobby name
  if (await isProfane(lobbyName)) {
- return json({ error: "Lobby name contains inappropriate language" }, 400);
+ return jsonError("Lobby name contains inappropriate language", 400);
  }
  const lobby = await createLobby({
  name: lobbyName,
@@ -443,8 +410,8 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  hostName: sanitizeString(body.hostName, 16) || auth.user?.username || "Host",
  hostUserId: auth.user?.id || null,
  type: (body.type as LobbyType) || "open",
- maxPlayers: Math.min(20, Math.max(2, parseInt(body.maxPlayers, 10) || 10)),
- minPlayers: Math.min(10, Math.max(2, parseInt(body.minPlayers, 10) || 2)),
+ maxPlayers: Math.min(20, Math.max(2, parseInt(String(body.maxPlayers), 10) || 10)),
+ minPlayers: Math.min(10, Math.max(2, parseInt(String(body.minPlayers), 10) || 2)),
  votingTimeMin: (() => {
  const v = Number(body.votingTimeMin);
  if (!Number.isFinite(v) || v <= 0) return 0.25;
@@ -462,7 +429,7 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  // ── Get Lobby ──
  if (action && !action.includes("/") && req.method === "GET") {
  const lobby = await getLobby(action);
- if (!lobby) return json({ error: "Lobby not found" }, 404);
+ if (!lobby) return jsonError("Lobby not found", 404);
  // Sanitized summary only: the raw lobby object leaked inviteCode (making
  // the private-lobby gate worthless), players[].userId and signup lists.
  return json({ lobby: lobbySummary(lobby) });
@@ -472,21 +439,21 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  if (action && action.includes("/")) {
  const [lobbyId, sub] = action.split("/");
  const lobby = await getLobby(lobbyId!);
- if (!lobby) return json({ error: "Lobby not found" }, 404);
+ if (!lobby) return jsonError("Lobby not found", 404);
 
  if (sub === "signup" && req.method === "POST") {
  const csrfErr = await requireCSRF(req);
  if (csrfErr) return csrfErr;
 
  const auth = await getAuthState(req);
- if (!auth.user) return json({ error: "Must be logged in to sign up" }, 401);
- if (auth.user.banned) return json({ error: "Account banned" }, 403);
+ if (!auth.user) return jsonError("Must be logged in to sign up", 401);
+ if (auth.user.banned) return jsonError("Account banned", 403);
 
  const rl = rateLimitSignup(auth.user.id);
  if (!rl.ok) return rateLimitedResponse(rl.retryAfter);
 
  const res = await addSignup(lobby, auth.user.id, auth.user.username);
- if (!res.ok) return json({ error: res.reason }, 400);
+ if (!res.ok) return jsonError(res.reason ?? "Signup failed", 400);
  return json({ lobby: res.lobby });
  }
 
@@ -495,7 +462,7 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  if (csrfErr) return csrfErr;
 
  const auth = await getAuthState(req);
- if (!auth.user) return json({ error: "Must be logged in" }, 401);
+ if (!auth.user) return jsonError("Must be logged in", 401);
  const updated = await removeSignup(lobby, auth.user.id);
  return json({ lobby: updated });
  }
@@ -505,7 +472,7 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  }
  }
 
- return json({ error: "Not found" }, 404);
+ return jsonError("Not found", 404);
 }
 
 // ─── HTTP API: Replays ───────────────────────────────────────────────────────
@@ -530,10 +497,11 @@ async function handleReplaysApi(req: Request, action: string): Promise<Response>
  // Accept the request, validate it for logging purposes, but DON'T store
  // anything. v0.4 clients never call this; v0.3 clients get a polite 200
  // so they don't error out.
- const body = await readJsonBody(req);
- if (!body) return json({ error: "Invalid JSON" }, 400);
+ const bodyRes = await readJsonBody(req);
+ if (!bodyRes.ok) return jsonBodyError(bodyRes);
+ const body = bodyRes.body;
  if (!body.replayId || !body.gameModule || typeof body.seed !== "number") {
- return json({ error: "Invalid replay data" }, 400);
+ return jsonError("Invalid replay data", 400);
  }
  // Silently drop. v0.4 clients store their own replays locally.
  return json({ ok: true, note: "Replay accepted but not stored. Use local archive in v0.4." });
@@ -546,7 +514,7 @@ async function handleReplaysApi(req: Request, action: string): Promise<Response>
  }, 410);
  }
 
- return json({ error: "Not found" }, 404);
+ return jsonError("Not found", 404);
 }
 
 // ─── HTTP API: Game Config (dynamic) ────────────────────────────────────────
@@ -566,7 +534,7 @@ async function handleGameConfigApi(): Promise<Response> {
  const gamesConfig = JSON.parse(gamesConfigText);
  const currentGame = gamesConfig.current_game;
  if (!currentGame) {
- return json({ error: "No current_game set in games.config.json" }, 500);
+ return jsonError("No current_game set in games.config.json", 500);
  }
 
  const modulePath = `games/${currentGame}/mod.js`;
@@ -611,14 +579,14 @@ async function handleGameConfigApi(): Promise<Response> {
  headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-cache" },
  }));
  } catch (e) {
- return json({ error: "Game config not found: " + String(e) }, 500);
+ console.error("[API] game-config failed:", e);
+ return jsonError("Game configuration unavailable", 500);
  }
 }
 
 // ─── HTTP API Router ─────────────────────────────────────────────────────────
 
 async function handleApi(req: Request, urlPath: string): Promise<Response> {
-  console.log("[DEBUG] handleApi:", urlPath);
  const [resource, ...rest] = urlPath.split("/");
  let action = rest.join("/");
   // Normalize: strip trailing slash and query string
@@ -646,7 +614,7 @@ async function handleApi(req: Request, urlPath: string): Promise<Response> {
  return handleAdminApi(req, action, auth);
  }
 
- return json({ error: "Not found" }, 404);
+ return jsonError("Not found", 404);
 }
 
 // ─── Startup: Purge all lobbies for clean state ──────────────────────────────
@@ -670,6 +638,21 @@ if (Deno.env.get("PURGE_ON_BOOT") === "1") {
 const MAX_WS_PER_IP = 10;
 const wsConnectionsByIp = new Map<string, number>();
 
+// ─── WS Idle Sweeper ─────────────────────────────────────────────────────────
+// Started lazily on the first WebSocket connection so importing this module
+// (e.g. from tests) never leaves a timer running. Half-open sockets that
+// never send another frame are closed after the idle timeout.
+const WS_SWEEP_INTERVAL_MS = 60 * 1000;
+let idleSweeperStarted = false;
+function ensureIdleSweeper(): void {
+ if (idleSweeperStarted) return;
+ idleSweeperStarted = true;
+ setInterval(() => {
+ const closed = sweepIdleConnections();
+ if (closed > 0) console.log(`[WS] Idle sweeper closed ${closed} stale connection(s)`);
+ }, WS_SWEEP_INTERVAL_MS);
+}
+
 const EXTRA_ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") || "")
  .split(",").map((s) => s.trim()).filter(Boolean);
 
@@ -681,10 +664,58 @@ function wsOriginAllowed(origin: string | null, selfOrigin: string): boolean {
  return EXTRA_ALLOWED_ORIGINS.includes(origin);
 }
 
-Deno.serve(async (req: Request) => {
+// ─── Request Logging (dev-gated) ─────────────────────────────────────────────
+// Quiet by default; set REQUEST_LOGGING=1 (or "true") for one structured
+// line per request in dev: method path status ms.
+const REQUEST_LOGGING = ["1", "true"].includes(
+ (Deno.env.get("REQUEST_LOGGING") || "").toLowerCase().trim(),
+);
+
+function withRequestLogging(handler: (req: Request) => Promise<Response>): (req: Request) => Promise<Response> {
+ if (!REQUEST_LOGGING) return handler;
+ return async (req: Request) => {
+ const start = performance.now();
+ let response: Response;
+ try {
+ response = await handler(req);
+ } catch (err) {
+ console.error("[HTTP] Unhandled handler error:", err);
+ response = jsonError("Internal server error", 500);
+ }
+ const ms = Math.round(performance.now() - start);
+ const path = new URL(req.url).pathname;
+ console.log(`${req.method} ${path} ${response.status} ${ms}ms`);
+ return response;
+ };
+}
+
+// ─── Graceful Shutdown (SIGINT / SIGTERM) ────────────────────────────────────
+
+let shuttingDown = false;
+async function gracefulShutdown(server: Deno.HttpServer, signal: string): Promise<void> {
+ if (shuttingDown) return;
+ shuttingDown = true;
+ console.log(`[Shutdown] ${signal} received, closing server...`);
+ // Close all live WebSocket connections first so clients see 1001
+ // ("Going Away") instead of a dropped socket.
+ for (const [pid, info] of connections.entries()) {
+ try {
+ info.ws.close(1001, "Server shutting down");
+ } catch { /* already closing */ }
+ connections.delete(pid);
+ }
+ try {
+ await server.shutdown();
+ console.log("[Shutdown] HTTP server closed. Bye.");
+ } catch (err) {
+ console.error("[Shutdown] Error while shutting down:", err);
+ }
+ Deno.exit(0);
+}
+
+const server = Deno.serve(withRequestLogging(async (req: Request) => {
  const url = new URL(req.url);
  const path = url.pathname;
-  console.log("[DEBUG] Request:", req.method, path, "from", req.headers.get("origin") || "unknown");
 
  // ── CORS preflight ──
  if (req.method === "OPTIONS") {
@@ -775,8 +806,11 @@ Deno.serve(async (req: Request) => {
  }
  }
 
- connections.set(playerId, { lobbyId: null, ws: socket, userId, username });
+ const connInfo: ConnectionInfo = { lobbyId: null, ws: socket, userId, username };
+ connections.set(playerId, connInfo);
  wsConnectionsByIp.set(wsIp, ipCount + 1);
+ touchConnection(playerId);
+ ensureIdleSweeper();
 
  socket.onopen = () => {
  safeSendLocal(socket, {
@@ -826,13 +860,22 @@ Deno.serve(async (req: Request) => {
  return await handleApi(req, apiPath);
  } catch (err) {
  console.error("[API] Error:", err);
- return json({ error: "Internal server error" }, 500);
+ return jsonError("Internal server error", 500);
  }
  }
 
  // ── Static files ──
  return await serveStaticFile(path);
-});
+}));
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+ try {
+ Deno.addSignalListener(signal, () => gracefulShutdown(server, signal));
+ } catch (err) {
+ // Some platforms (e.g. Deno Deploy) do not support signal listeners.
+ console.warn(`[Shutdown] ${signal} listener unavailable:`, err);
+ }
+}
 
 function safeSendLocal(ws: WebSocket, data: unknown): void {
  try {

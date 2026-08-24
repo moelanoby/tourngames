@@ -10,8 +10,6 @@
  * checkLobbyInvariant(lobby); // throws if corrupt
  */
 
-import type { Lobby } from "./types.ts";
-
 /** Ensure a lobby's internal state is consistent. Returns list of violations. */
 export function validateLobby(lobby: unknown): string[] {
  const violations: string[] = [];

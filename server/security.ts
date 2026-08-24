@@ -6,6 +6,8 @@
  * - CSRF token generation and validation
  * - Security headers (CSP, HSTS, X-Frame-Options, etc.)
  * - Input sanitization helpers
+ * - Shared HTTP response/body helpers (JSON envelope, capped body reader)
+ * - Cookie parsing
  * - Audit logging to Deno KV
  * - Client IP extraction (behind proxy)
  */
@@ -169,6 +171,88 @@ export function applySecurityHeaders(response: Response): Response {
  return response;
 }
 
+// ─── Shared HTTP Helpers ─────────────────────────────────────────────────────
+
+/** Single JSON response envelope used by every API handler. */
+export function jsonResponse(
+ data: unknown,
+ status = 200,
+ extraHeaders?: Record<string, string>,
+): Response {
+ const headers: Record<string, string> = {
+ "Content-Type": "application/json; charset=utf-8",
+ "Cache-Control": "no-store",
+ };
+ if (extraHeaders) Object.assign(headers, extraHeaders);
+ return applySecurityHeaders(new Response(JSON.stringify(data), { status, headers }));
+}
+
+/** Consistent error envelope: { error: "<message>" } with the given status. */
+export function jsonError(
+ message: string,
+ status = 400,
+ extraHeaders?: Record<string, string>,
+): Response {
+ return jsonResponse({ error: message }, status, extraHeaders);
+}
+
+/** Parse a raw Cookie header into a key/value map (strict split on first '='). */
+export function parseCookies(cookieHeader: string | null): Record<string, string> {
+ const out: Record<string, string> = {};
+ if (!cookieHeader) return out;
+ for (const part of cookieHeader.split(";")) {
+ const idx = part.indexOf("=");
+ if (idx === -1) continue;
+ const key = part.slice(0, idx).trim();
+ const val = part.slice(idx + 1).trim();
+ out[key] = val;
+ }
+ return out;
+}
+
+/** Default cap for JSON request bodies (64 KB covers every legit API payload). */
+export const MAX_JSON_BODY_BYTES = 64 * 1024;
+
+export type JsonBodyResult =
+ | { ok: true; body: Record<string, unknown> }
+ | { ok: false; reason: "invalid-json" | "too-large" };
+
+/**
+ * Read and parse a JSON request body with a hard size cap.
+ *
+ * Returns a discriminated result instead of throwing so handlers can answer
+ * 400 (invalid) or 413 (oversized) without leaking internals. Oversize is
+ * checked both on Content-Length (fast path) and on the actual bytes read,
+ * so chunked requests cannot bypass the cap.
+ */
+export async function readJsonBody(
+ req: Request,
+ maxBytes = MAX_JSON_BODY_BYTES,
+): Promise<JsonBodyResult> {
+ const contentLength = Number(req.headers.get("content-length") || "0");
+ if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+ return { ok: false, reason: "too-large" };
+ }
+ let text: string;
+ try {
+ text = await req.text();
+ } catch {
+ return { ok: false, reason: "invalid-json" };
+ }
+ if (new TextEncoder().encode(text).length > maxBytes) {
+ return { ok: false, reason: "too-large" };
+ }
+ try {
+ const parsed = JSON.parse(text);
+ if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+ return { ok: false, reason: "invalid-json" };
+ }
+ return { ok: true, body: parsed as Record<string, unknown> };
+ } catch {
+ return { ok: false, reason: "invalid-json" };
+ }
+}
+
 // ─── CSRF Protection ─────────────────────────────────────────────────────────
 // CSRF tokens are stored in-memory, keyed by session token.
 // This is sufficient because sessions are single-server (Deno Deploy isolates).
@@ -246,12 +330,17 @@ export function sanitizeLobbyName(str: unknown): string {
 // The bad-words package is updated independently on npm, so new profanity
 // is automatically picked up when Deno fetches the latest version.
 
-let _badWordsFilter: any = null;
-async function getBadWordsFilter() {
+interface BadWordsFilter {
+ isProfane(text: string): boolean;
+ clean(text: string): string;
+}
+
+let _badWordsFilter: BadWordsFilter | null = null;
+async function getBadWordsFilter(): Promise<BadWordsFilter | null> {
  if (_badWordsFilter) return _badWordsFilter;
  try {
  const Filter = (await import("npm:bad-words@3.0.0")).default;
- _badWordsFilter = new Filter();
+ _badWordsFilter = new Filter() as BadWordsFilter;
  } catch (e) {
  console.warn("[Security] Failed to load bad-words filter:", e);
  _badWordsFilter = null;
@@ -586,30 +675,6 @@ export async function isProfane(text: string): Promise<boolean> {
 
  // 3. Check with smart algorithm (catches "f u c k", "fu ck", "s.h.i.t")
  return checkSmartProfanity(text);
-}
-
-/**
- * Sanitize text by replacing profane words with asterisks.
- * Returns the cleaned text.
- */
-export async function cleanProfanity(text: string): Promise<string> {
- if (!text) return text;
- const filter = await getBadWordsFilter();
- if (filter) {
- try {
- return filter.clean(text);
- } catch { /* fall through */ }
- }
- // Fallback: just check custom roots
- let cleaned = text;
- const normalized = normalizeLeet(text);
- for (const root of CUSTOM_BANNED_ROOTS) {
- if (normalized.includes(root)) {
- const re = new RegExp(root, "gi");
- cleaned = cleaned.replace(re, "*".repeat(root.length));
- }
- }
- return cleaned;
 }
 
 // ─── Audit Logging ───────────────────────────────────────────────────────────

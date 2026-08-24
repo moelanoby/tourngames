@@ -50,14 +50,7 @@ export function renderReplayList(replays) {
 
  container.innerHTML = "";
  replays.forEach((replay) => {
- const date = new Date(replay.createdAt);
- const dateStr = date.toLocaleDateString("en-US", {
- month: "short",
- day: "numeric",
- year: "numeric",
- hour: "2-digit",
- minute: "2-digit",
- });
+ const dateStr = formatReplayDate(replay.createdAt);
  const duration = formatDuration(replay.duration);
  const winnerName = replay.winnerName || replay.winner?.slice(0, 8) || "???";
  const playerCount = replay.players?.length || 0;
@@ -93,6 +86,23 @@ export function renderReplayList(replays) {
  playReplay(replay, `/games/${moduleId}/mod.js`);
  });
  container.appendChild(div);
+ });
+}
+
+/**
+ * Consistent replay timestamp formatting ("Mar 7, 2026, 02:15 PM").
+ * Matches the date style app.js uses for local-archive replays.
+ */
+export function formatReplayDate(ts) {
+ if (!ts) return "";
+ const d = new Date(ts);
+ if (Number.isNaN(d.getTime())) return "";
+ return d.toLocaleString("en-US", {
+ month: "short",
+ day: "numeric",
+ year: "numeric",
+ hour: "2-digit",
+ minute: "2-digit",
  });
 }
 
@@ -177,7 +187,6 @@ export async function playReplay(replay, gameModulePath) {
  const playPauseBtn = document.getElementById("replay-play-pause");
  const speedSelect = document.getElementById("replay-speed");
  const frameDisplay = document.getElementById("replay-frame");
- const totalDisplay = document.getElementById("replay-total");
 
  scrub.addEventListener("input", (e) => {
  replayCurrentFrame = parseInt(e.target.value, 10);

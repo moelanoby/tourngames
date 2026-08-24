@@ -16,8 +16,6 @@
  * established, the server steps back entirely.
  */
 
-import type { PlayerSession } from "./types.ts";
-
 const kv = await Deno.openKv();
 
 const PEER_TTL_MS = 2 * 60 * 1000; // 2 minutes
@@ -197,17 +195,3 @@ export async function pollSignals(targetId: string): Promise<SignalEntry[]> {
  });
 }
 
-// ─── Cleanup ─────────────────────────────────────────────────────────────────
-
-/**
- * Remove all phonebook entries for a lobby (called when lobby is deleted).
- */
-export async function clearLobbyPhonebook(lobbyId: string): Promise<void> {
- for await (const entry of kv.list({ prefix: ["lobby-peer", lobbyId] })) {
- await kv.delete(entry.key);
- // Also delete the peer entry if it references this lobby
- if (entry.value && typeof entry.value === "object" && "playerId" in entry.value) {
- await kv.delete(["peer", (entry.value as PeerEntry).playerId]);
- }
- }
-}

@@ -1,9 +1,5 @@
 // deno-lint-ignore-file no-window
 /**
-
-
-=== FILE: public/ui/firebase.js ===
-
  * firebase.js - Firebase Service Module
  * 
  * Replaces server-side API + WebSocket signaling with Firebase:
@@ -56,7 +52,6 @@ export function initFirebase() {
   auth = getAuth(app);
   db = getDatabase(app);
   initialized = true;
-  console.log("[Firebase] Initialized");
   return true;
 }
 

@@ -10,21 +10,65 @@
  * - auth.showModal(tab)
  */
 
-import { 
-  initFirebase, 
-  getAuthInstance, 
-  signInAnon, 
-  signInWithPassword, 
-  registerWithPassword, 
-  signOutUser, 
-  getCurrentUser,
+import {
+  initFirebase,
+  signInWithPassword,
+  registerWithPassword,
+  signOutUser,
   startAuthListener,
   onAuthChange as firebaseOnAuthChange
-} from "./firebase.js?v=20260924h";
+} from "./firebase.js?v=20260925a";
 // Same module URL as firebase.js imports - shares the SDK instance.
 import { updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const dom = {};
+
+/** Firebase error code -> plain-English message. */
+const AUTH_ERROR_MESSAGES = {
+  "auth/email-already-in-use": "That username is already taken",
+  "auth/invalid-credential": "Invalid username or password",
+  "auth/user-not-found": "Invalid username or password",
+  "auth/wrong-password": "Invalid username or password",
+  "auth/weak-password": "Password too weak (min 6 characters)",
+  "auth/invalid-email": "Invalid username format",
+  "auth/too-many-requests": "Too many attempts - wait a minute and try again",
+  "auth/network-request-failed": "Network error - check your connection",
+};
+
+/**
+ * Insert (or reuse) an inline .form-error message element right after a
+ * field, so validation problems show next to the input instead of only
+ * in the shared error line.
+ */
+function ensureFieldError(input) {
+  if (!input) return null;
+  let el = input.parentElement.querySelector(".form-error");
+  if (!el) {
+    el = document.createElement("p");
+    el.className = "form-error hidden";
+    input.parentElement.appendChild(el);
+  }
+  return el;
+}
+
+function showFieldError(input, msg) {
+  const el = ensureFieldError(input);
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.remove("hidden");
+}
+
+function clearFieldErrors() {
+  for (const input of [dom.authUsername, dom.authPassword]) {
+    const el = ensureFieldError(input);
+    if (el) {
+      el.textContent = "";
+      el.classList.add("hidden");
+    }
+  }
+}
+
+let submitPending = false;
 
 function cacheDom() {
   dom.authModal = document.getElementById("auth-modal");
@@ -72,6 +116,10 @@ export async function init() {
 
   // Form submit
   dom.authForm.addEventListener("submit", handleSubmit);
+
+  // Clear inline validation messages as soon as the user edits a field.
+  dom.authUsername?.addEventListener("input", clearFieldErrors);
+  dom.authPassword?.addEventListener("input", clearFieldErrors);
 
   // Logout
   dom.logoutBtn.addEventListener("click", handleLogout);
@@ -125,6 +173,7 @@ export function showModal(tab = "login") {
   dom.authUsername.value = "";
   dom.authPassword.value = "";
   dom.authError.classList.add("hidden");
+  clearFieldErrors();
   setTimeout(() => dom.authUsername.focus(), 50);
 }
 
@@ -135,21 +184,32 @@ export function hideModal() {
 
 async function handleSubmit(e) {
   e.preventDefault();
+  if (submitPending) return; // guard against double submits
+
   const username = dom.authUsername.value.trim();
   const password = dom.authPassword.value;
-  if (!username || !password) {
-    showError("Enter username and password");
-    return;
-  }
 
+  // Inline per-field validation.
+  let valid = true;
+  if (!username) {
+    showFieldError(dom.authUsername, "Enter a username");
+    valid = false;
+  }
+  if (!password) {
+    showFieldError(dom.authPassword, "Enter a password");
+    valid = false;
+  }
+  if (!valid) return;
+
+  dom.authError.classList.add("hidden");
+  submitPending = true;
   dom.authSubmitBtn.disabled = true;
   dom.authSubmitBtn.textContent = currentTab === "login" ? "Logging in..." : "Creating...";
 
   try {
     let user;
     if (currentTab === "login") {
-      // For login, use email = username@tourngames.local (or just use Firebase Auth email)
-      // We'll use a simple approach: email = username + "@tourngames.local"
+      // Login maps the chosen username onto a Firebase email address.
       user = await signInWithPassword(username + "@tourngames.local", password);
     } else {
       user = await registerWithPassword(username + "@tourngames.local", password, username);
@@ -162,29 +222,29 @@ async function handleSubmit(e) {
 
     hideModal();
   } catch (err) {
-    // Handle Firebase error codes
-    let msg = "Something went wrong";
-    if (err.code === "auth/user-not-found" || err.code === "auth/wrong-password") {
-      msg = "Invalid username or password";
-    } else if (err.code === "auth/email-already-in-use") {
-      msg = "Username already taken";
-    } else if (err.code === "auth/weak-password") {
-      msg = "Password too weak (min 6 characters)";
-    } else if (err.code === "auth/invalid-email") {
-      msg = "Invalid username format";
-    } else {
-      msg = err.message;
-    }
-    showError(msg);
+    showError(friendlyAuthError(err));
   } finally {
+    submitPending = false;
     dom.authSubmitBtn.disabled = false;
     dom.authSubmitBtn.textContent = currentTab === "login" ? "Log in" : "Sign up";
   }
 }
 
+function friendlyAuthError(err) {
+  return AUTH_ERROR_MESSAGES[err?.code] || "Something went wrong - try again";
+}
+
 function showError(msg) {
   dom.authError.textContent = msg;
   dom.authError.classList.remove("hidden");
+}
+
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 async function handleLogout() {
@@ -200,7 +260,8 @@ function setUser(user) {
     dom.authButtons.classList.add("hidden");
     dom.userMenu.classList.remove("hidden");
     dom.userMenu.classList.add("flex");
-    let display = user.username;
+    // Username is user-controlled - escape it before the innerHTML build.
+    let display = escapeHtml(user.username);
     if (user.wins !== undefined) display += ` · ${user.wins}w`;
     if (user.isAnonymous) display += ' <span class="user-badge user-badge-guest">GUEST</span>';
     dom.userDisplay.innerHTML = display;

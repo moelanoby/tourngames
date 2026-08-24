@@ -254,6 +254,9 @@ async function handleCreate() {
       hostName: user.displayName || user.email?.split("@")[0] || "Host",
     });
     showToast("Lobby created!", "success");
+    // QoL: making a new game instantly purges your older dead/duplicate
+    // lobbies so lists never fill up with stale "X's lobby" copies.
+    cleanupStaleLobbies().catch(() => {});
     createFormOpen = false;
     dom.createForm.classList.add("hidden");
     // Auto-join the lobby you created

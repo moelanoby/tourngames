@@ -306,39 +306,100 @@ export async function deleteLobby(lobbyId) {
 }
 
 /**
- * Sweep dead lobbies so they don't pile up:
- *  - non-waiting lobbies older than 2h since start (match long over)
- *  - any lobby with no activity for over an hour
- * Safe to call repeatedly; runs for every client but deletions are
- * idempotent and only touch clearly-dead records.
- * Returns the number of lobbies removed.
+ * Dynamic QoL sweep that deletes dead lobbies so they don't pile up.
+ * A lobby is dead when ANY of these hold:
+ *  1. Its host is gone: no presence entry or lastSeen older than
+ *     HOST_OFFLINE_MS (covers closed tabs via onDisconnect).
+ *  2. The host made a NEWER waiting lobby (duplicate cleanup): only the
+ *     newest waiting lobby per host survives.
+ *  3. Age: idle for over an hour, or the match ended more than 2h ago.
+ *
+ * Freshly created lobbies get a short grace period so a slow presence
+ * write can't get your lobby nuked. Safe to call repeatedly from any
+ * client; deletions are idempotent. Returns number of lobbies removed.
  */
-export async function cleanupStaleLobbies(maxAgeMs = 60 * 60 * 1000, matchMaxAgeMs = 2 * 60 * 60 * 1000) {
+const HOST_OFFLINE_MS = 5 * 60 * 1000;      // host absent from presence >5min
+const NEW_LOBBY_GRACE_MS = 2 * 60 * 1000;   // newborn lobbies can't be swept
+const LOBBY_IDLE_MAX_MS = 60 * 60 * 1000;   // no activity for 1h
+const MATCH_OVER_MAX_MS = 2 * 60 * 60 * 1000; // match ended >2h ago
+
+export async function cleanupStaleLobbies() {
   if (!initialized) initFirebase();
-  const snapshot = await get(ref(db, "lobbies"));
-  if (!snapshot.exists()) return 0;
+  const [lobbiesSnap, presenceSnap] = await Promise.all([
+    get(ref(db, "lobbies")),
+    get(ref(db, "presence")),
+  ]);
+  if (!lobbiesSnap.exists()) return 0;
+
+  // Presence lookup: uid -> { status, lastSeen }
+  const presence = {};
+  if (presenceSnap.exists()) {
+    presenceSnap.forEach((child) => { presence[child.key] = child.val() || {}; });
+  }
+
   const now = Date.now();
   let removed = 0;
-  snapshot.forEach((child) => {
+  const deadKeys = new Set();
+
+  // Collect waiting lobbies grouped by host (for duplicate detection).
+  const byHost = {};
+  const entries = [];
+  lobbiesSnap.forEach((child) => {
     const lobby = child.val();
     if (!lobby || !child.key) return;
+    entries.push({ key: child.key, lobby });
+
+    if (lobby.status !== "waiting") return;
+
+    // Rule 1: host left the game (offline presence), past grace period.
+    const createdAt = typeof lobby.createdAt === "number" ? lobby.createdAt : 0;
+    const fresh = createdAt && (now - createdAt < NEW_LOBBY_GRACE_MS);
+    const pres = lobby.hostId ? presence[lobby.hostId] : null;
+    const lastSeen = typeof pres?.lastSeen === "number" ? pres.lastSeen : 0;
+    const hostOnline = pres && pres.status === "online"
+      && (!lastSeen || now - lastSeen < HOST_OFFLINE_MS);
+
+    if (!fresh && !hostOnline) {
+      deadKeys.add(child.key);
+      removed++;
+      return;
+    }
+    if (lobby.hostId) {
+      (byHost[lobby.hostId] = byHost[lobby.hostId] || []).push({ key: child.key, lobby });
+    }
+  });
+
+  // Rule 2: multiple waiting lobbies from one host -> keep the newest,
+  // sweep the rest ("host made a new game" duplicates).
+  Object.values(byHost).forEach((list) => {
+    if (list.length < 2) return;
+    list.sort((a, b) => (b.lobby.updatedAt || b.lobby.createdAt || 0) - (a.lobby.updatedAt || a.lobby.createdAt || 0));
+    for (let i = 1; i < list.length; i++) {
+      if (!deadKeys.has(list[i].key)) {
+        deadKeys.add(list[i].key);
+        removed++;
+      }
+    }
+  });
+
+  // Rule 3: age-based fallbacks.
+  entries.forEach(({ key, lobby }) => {
+    if (deadKeys.has(key)) return;
     const updatedAt = typeof lobby.updatedAt === "number" ? lobby.updatedAt : null;
     const startedAt = typeof lobby.startedAt === "number" ? lobby.startedAt : null;
     const createdAt = typeof lobby.createdAt === "number" ? lobby.createdAt : updatedAt;
     const lastActivity = Math.max(updatedAt || 0, startedAt || 0, createdAt || 0);
 
-    let dead = false;
-    if (lobby.status && lobby.status !== "waiting" && startedAt && now - startedAt > matchMaxAgeMs) {
-      dead = true; // match ended hours ago
-    }
-    if (!lastActivity || now - lastActivity > maxAgeMs) {
-      dead = true; // nobody touched it for over an hour
-    }
-    if (dead) {
+    const matchLongOver = lobby.status && lobby.status !== "waiting"
+      && startedAt && now - startedAt > MATCH_OVER_MAX_MS;
+    const longIdle = !lastActivity || now - lastActivity > LOBBY_IDLE_MAX_MS;
+    if (matchLongOver || longIdle) {
+      deadKeys.add(key);
       removed++;
-      deleteLobby(child.key).catch(() => {});
     }
   });
+
+  deadKeys.forEach((key) => { deleteLobby(key).catch(() => {}); });
   return removed;
 }
 

@@ -17,16 +17,16 @@
  * - Signups: reserve slots in signup-type lobbies
  */
 
-import * as auth from "./ui/auth.js?v=20260924b";
-import * as fb from "./ui/firebase.js?v=20260924b";
-import * as lobbies from "./ui/lobbies.js?v=20260924b";
-import * as admin from "./ui/admin.js?v=20260924b";
+import * as auth from "./ui/auth.js?v=20260924c";
+import * as fb from "./ui/firebase.js?v=20260924c";
+import * as lobbies from "./ui/lobbies.js?v=20260924c";
+import * as admin from "./ui/admin.js?v=20260924c";
 import {
  saveLocalReplay,
  loadLocalReplays,
  renameLocalReplay,
-} from "./ui/local-archive.js?v=20260924b";
-import * as cookies from "./ui/cookies.js?v=20260924b";
+} from "./ui/local-archive.js?v=20260924c";
+import * as cookies from "./ui/cookies.js?v=20260924c";
 
 // ─── Polyfills ───────────────────────────────────────────────────────────────
 
@@ -789,7 +789,7 @@ class GameManager {
 
  async loadGameModule(gameModulePath) {
  showLoading("Loading game module...");
- const mod = await import("./" + gameModulePath);
+ const mod = await import("./" + gameModulePath + "?v=20260924c");
  this.module = mod.default || mod;
  return this.module;
  }
@@ -1002,7 +1002,13 @@ class GameManager {
  receiveState(newState, tick) {
  // Reject anything that isn't a complete game state (legacy RTDB-mangled
  // nodes had proposals/board stripped by the database).
- if (!newState || !newState.data || !Array.isArray(newState.data.board)) return;
+ const okBoard = newState && newState.data && Array.isArray(newState.data.board)
+ && newState.data.board.length === 8
+ && newState.data.board.every((row) => Array.isArray(row) && row.length === 8);
+ if (!okBoard) {
+ console.warn("[GameManager] rejected malformed game state");
+ return;
+ }
  newState.data.proposals = newState.data.proposals || [];
  newState.data.playerVotes = newState.data.playerVotes || {};
  this.state = newState;
@@ -1870,6 +1876,10 @@ function toAlgebraic([r, c]) {
 function updateGameSidebar(gameState) {
  if (!gameState || !gameState.data) return;
  const data = gameState.data;
+ // Defensive: legacy/corrupted relay states can lack these (RTDB strips
+ // empty arrays); never let the render loop crash because of it.
+ data.proposals = Array.isArray(data.proposals) ? data.proposals : [];
+ data.playerVotes = data.playerVotes && typeof data.playerVotes === "object" ? data.playerVotes : {};
  state.gameState = gameState; // store for chat team lookup
 
  // ─── Check for capture sound ───

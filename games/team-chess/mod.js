@@ -183,6 +183,17 @@ const MIN_VOTING_MS = 5000;
 const MAX_VOTING_MS = 120000; // hard cap: 2 minutes
 const QUORUM_EXEC_DELAY_MS = 15000; // 15s from "enough votes" to execution
 
+// ─── Dynamic voting timer ────────────────────────────────────────────────────
+// The host's vote time is a BASE, not a rigid countdown:
+//  - Every turn starts with the full base time.
+//  - When a player submits a NEW proposal while the clock is running low
+//    (< half the base left), the timer tops back up to half the base so
+//    teammates always get time to react to fresh moves.
+//  - The clock never exceeds the full base time from "now".
+//  - Quorum lock-in (majority -> execute after 15s) overrides everything,
+//    and an empty clock with no proposals skips the turn as before.
+const VOTE_REFRESH_FRACTION = 0.5; // top up to 50% of base on new proposal
+
 export function normalizeTimers(options) {
  const o = options || {};
 
@@ -400,6 +411,13 @@ export function updateGameState(state, inputs, dt) {
  if (isLegalMove(data.board, input.from, input.to, team)) {
  // Remove any existing proposal by this player
  data.proposals = data.proposals.filter((p) => p.playerId !== playerId);
+ // Dynamic vote timer: a fresh proposal guarantees the team at least
+ // half of the base vote time to react (capped at the full base).
+ const refreshFloor = state.timestamp + data.votingDurationMs * VOTE_REFRESH_FRACTION;
+ const refreshCap = state.timestamp + data.votingDurationMs;
+ if (!data.quorumExecAt && refreshFloor > data.phaseDeadline) {
+ data.phaseDeadline = Math.min(refreshFloor, refreshCap);
+ }
  const proposal = {
  id: toAlgebraic(input.from) + "-" + toAlgebraic(input.to) + "-" + playerId.slice(0, 4),
  from: input.from,

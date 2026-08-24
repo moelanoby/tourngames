@@ -2264,7 +2264,7 @@ async function main() {
       showToast("Log in to create a lobby", "error");
       return;
     }
-    const lobbyName = state.playerName + "\'s Lobby";
+    const lobbyName = state.playerName + "'s lobby :D!";
     try {
       const lobby = await fb.createLobby({
         name: lobbyName,

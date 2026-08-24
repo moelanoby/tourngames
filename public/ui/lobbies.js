@@ -202,7 +202,9 @@ async function handleCreate() {
     return;
   }
 
-  const name = dom.createName?.value?.trim() || "Untitled Lobby";
+  // Default lobby name: "{Username}'s lobby :D!"
+  const fallbackName = (user.displayName || user.email?.split("@")[0] || "Someone") + "'s lobby :D!";
+  const name = dom.createName?.value?.trim() || fallbackName;
   const game = dom.createGame?.value || "team-chess";
   const type = dom.createType?.value || "open";
   const minPlayers = Math.max(2, parseInt(dom.createMin?.value, 10) || 2);

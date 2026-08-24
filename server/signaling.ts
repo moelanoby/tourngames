@@ -70,11 +70,9 @@ export function removeConnection(playerId: string): void {
 // production deployments behind symmetric NATs.
 
 function buildIceConfig() {
+ // Small list on purpose: 5+ STUN/TURN servers slow discovery in Chrome.
  const iceServers: any[] = [
  { urls: "stun:stun.l.google.com:19302" },
- { urls: "stun:stun1.l.google.com:19302" },
- { urls: "stun:stun2.l.google.com:19302" },
- { urls: "stun:stun3.l.google.com:19302" },
  ];
 
  const turnUrl = Deno.env.get("TURN_SERVER_URL");
@@ -92,7 +90,6 @@ function buildIceConfig() {
  // NATs still connect during development.
  for (const urls of [
  "turn:openrelay.metered.ca:80",
- "turn:openrelay.metered.ca:443",
  "turn:openrelay.metered.ca:443?transport=tcp",
  ]) {
  iceServers.push({ urls, username: "openrelayproject", credential: "openrelayproject" });

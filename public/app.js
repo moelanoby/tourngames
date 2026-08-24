@@ -17,16 +17,16 @@
  * - Signups: reserve slots in signup-type lobbies
  */
 
-import * as auth from "./ui/auth.js";
-import * as fb from "./ui/firebase.js";
-import * as lobbies from "./ui/lobbies.js";
-import * as admin from "./ui/admin.js";
+import * as auth from "./ui/auth.js?v=20260924b";
+import * as fb from "./ui/firebase.js?v=20260924b";
+import * as lobbies from "./ui/lobbies.js?v=20260924b";
+import * as admin from "./ui/admin.js?v=20260924b";
 import {
  saveLocalReplay,
  loadLocalReplays,
  renameLocalReplay,
-} from "./ui/local-archive.js";
-import * as cookies from "./ui/cookies.js";
+} from "./ui/local-archive.js?v=20260924b";
+import * as cookies from "./ui/cookies.js?v=20260924b";
 
 // ─── Polyfills ───────────────────────────────────────────────────────────────
 
@@ -56,15 +56,17 @@ const P2P_TIMEOUT_MS = 4000;
 // route through TURN relays as well. These are the free Open Relay Project
 // credentials - fine for testing, swap in your own Metered/Cloudflare/Xirsys
 // credentials for production via window.TURN_CONFIG = { iceServers: [...] }.
+// Keep the total list small - Chrome warns that 5+ STUN/TURN servers
+// slow down candidate discovery, which itself causes ICE timeouts.
 const TURN_SERVERS = [
+ // UDP relay (fastest when UDP egress is allowed)...
  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
- { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+ // ...and TCP relay as the escape hatch when UDP is blocked entirely.
  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
 const ICE_CONFIG_DEFAULT = {
  iceServers: [
  { urls: "stun:stun.l.google.com:19302" },
- { urls: "stun:stun1.l.google.com:19302" },
  ...(window.TURN_CONFIG && Array.isArray(window.TURN_CONFIG.iceServers)
  ? window.TURN_CONFIG.iceServers : TURN_SERVERS),
  ],

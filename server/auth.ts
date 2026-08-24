@@ -335,12 +335,17 @@ export async function recordFailedLogin(user: User): Promise<User> {
 }
 
 export async function recordSuccessfulLogin(user: User, ip: string): Promise<User> {
- user.failedLoginAttempts = 0;
- user.lockedUntil = null;
- user.lastLoginAt = Date.now();
- user.lastLoginIp = ip;
- await kv.set(["user", user.id], user);
- return user;
+ // Applied to a FRESH copy of the record inside an atomic transaction.
+ // The old plain kv.set wrote the caller's (stale) snapshot back wholesale:
+ // a ban or lockout committed between the login handler's read and this
+ // write was silently erased (banned=true -> false), un-banning the user.
+ const updated = await updateUserAtomic(user.id, (fresh) => {
+ fresh.failedLoginAttempts = 0;
+ fresh.lockedUntil = null;
+ fresh.lastLoginAt = Date.now();
+ fresh.lastLoginIp = ip;
+ });
+ return updated ?? user;
 }
 
 // ─── Ban Management ──────────────────────────────────────────────────────────

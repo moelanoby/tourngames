@@ -181,7 +181,13 @@ export async function listLobbies(gameId?: string, includePrivate = false): Prom
  await kv.delete(["lobby", lobby.id]);
  continue;
  }
- if (now - lastActivity > LOBBY_TIMEOUT_MS) {
+ // Idle cutoff depends on state: waiting lobbies expire after 30 min idle,
+ // but a started match is only swept after 2h. The old flat 30-min rule
+ // fired BEFORE the started-match window below and deleted live matches
+ // mid-game (server-side writes stop once P2P play begins, so an active
+ // match legitimately looks "idle").
+ const idleLimit = lobby.status === "waiting" ? LOBBY_TIMEOUT_MS : 2 * LOBBY_TIMEOUT_MS;
+ if (now - lastActivity > idleLimit) {
  await kv.delete(["lobby", lobby.id]);
  continue;
  }
@@ -301,24 +307,32 @@ export async function removePlayerFromLobby(
  lobby: Lobby,
  playerId: PlayerID,
 ): Promise<Lobby> {
- // Null-safe: ensure players array exists
- if (!Array.isArray(lobby.players)) lobby.players = [];
- lobby.players = lobby.players.filter((p) => p.id !== playerId);
- if (lobby.players.length === 0) {
+ // Atomic re-verify + write: the old read-filter-writeback lost updates when
+ // two players left at once (the second stale write resurrected the first
+ // removed player). Capacity/host invariants are now checked against live data.
+ const result = await mutateLobbyAtomically(lobby, (fresh) => {
+ if (!Array.isArray(fresh.players)) fresh.players = [];
+ fresh.players = fresh.players.filter((p) => p.id !== playerId);
+ // Drop the departed player's p2p-ready flag so a stale key cannot make the
+ // remaining players look fully connected.
+ if (fresh.p2pReady && typeof fresh.p2pReady === "object") {
+ delete fresh.p2pReady[playerId];
+ }
+ if (fresh.players.length === 0) {
  // Don't delete keep the lobby so others can still join via browser
  // But reset host if host left
- lobby.hostId = null;
- await updateLobby(lobby);
- return lobby;
+ fresh.hostId = null;
+ return { ok: true, write: true };
  }
  // If host left, pick a new host
- if (lobby.hostId === playerId) {
- lobby.hostId = lobby.players[0]?.id || null;
- lobby.hostName = lobby.players[0]?.name || "Unknown";
- lobby.hostUserId = lobby.players[0]?.userId || null;
+ if (fresh.hostId === playerId) {
+ fresh.hostId = fresh.players[0]?.id || null;
+ fresh.hostName = fresh.players[0]?.name || "Unknown";
+ fresh.hostUserId = fresh.players[0]?.userId || null;
  }
- await updateLobby(lobby);
- return lobby;
+ return { ok: true, write: true };
+ });
+ return result.lobby;
 }
 
 // ─── Signups ─────────────────────────────────────────────────────────────────
@@ -352,11 +366,15 @@ export async function addSignup(lobby: Lobby, userId: UserID, username: string):
 }
 
 export async function removeSignup(lobby: Lobby, userId: UserID): Promise<Lobby> {
- if (!Array.isArray(lobby.signups)) lobby.signups = [];
- lobby.signups = lobby.signups.filter((s) => s.userId !== userId);
- await updateLobby(lobby);
+ // Same atomic treatment as removePlayerFromLobby: concurrent un-signups must
+ // not lose each other's removals through stale whole-object writes.
+ const result = await mutateLobbyAtomically(lobby, (fresh) => {
+ if (!Array.isArray(fresh.signups)) fresh.signups = [];
+ fresh.signups = fresh.signups.filter((s) => s.userId !== userId);
+ return { ok: true, write: true };
+ });
  await kv.delete(["signup", lobby.id, userId]);
- return lobby;
+ return result.lobby;
 }
 
 // ─── Match Start ─────────────────────────────────────────────────────────────

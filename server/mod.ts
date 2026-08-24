@@ -106,16 +106,20 @@ const MIME_TYPES: Record<string, string> = {
 
 // Get the directory of the current module (server/mod.ts)
 const __dirname = new URL(".", import.meta.url).pathname;
+// Repo root = parent of server/. Static assets live at repo root (public/, games/, sdk/),
+// so resolve everything against the root - NOT import.meta.url, which points into server/
+// and made every asset 404.
+const ROOT_DIR = new URL("../", import.meta.url).pathname;
+const joinRoot = (rel: string) => ROOT_DIR + rel.replace(/^\/+/, "");
 function resolveStaticPath(urlPath: string): string | null {
   let p = urlPath.replace(/^\/+/, "");
   if (p.includes("..") || p.includes("\\")) return null;
-  if (p === "" || p === "index.html") return new URL("public/index.html", import.meta.url).pathname;
+  if (p === "" || p === "index.html") return joinRoot("public/index.html");
   if (p.startsWith("public/")) p = p.slice("public/".length);
-  if (p.startsWith("ui/")) return new URL("public/ui/" + p.slice("ui/".length), import.meta.url).pathname;
-  if (p.startsWith("games/")) return new URL(p, import.meta.url).pathname;
-  if (p.startsWith("assets/")) return new URL("public/assets/" + p.slice("assets/".length), import.meta.url).pathname;
-  if (p.startsWith("sdk/")) return new URL("sdk/" + p.slice("sdk/".length), import.meta.url).pathname;
-  return new URL("public/" + p, import.meta.url).pathname;
+  if (p.startsWith("ui/")) return joinRoot("public/ui/" + p.slice("ui/".length));
+  if (p.startsWith("games/") || p.startsWith("sdk/")) return joinRoot(p);
+  if (p.startsWith("assets/")) return joinRoot("public/assets/" + p.slice("assets/".length));
+  return joinRoot("public/" + p);
 }
 
 async function serveStaticFile(urlPath: string): Promise<Response> {

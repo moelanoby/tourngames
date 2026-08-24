@@ -411,14 +411,17 @@ export async function handleWebSocketMessage(
  safeSend(ws, { type: "error", message: res.reason || "Could not start match" });
  return;
  }
- // Notify all players
- await broadcastLobbyState(lobby.id, {
+ // Notify all players. Use the POST-mutation lobby (res.lobby): startLobbyMatch
+ // mutates a fresh clone inside the transaction, so the caller's `lobby`
+ // snapshot still has seed=null and broadcasting it sent clients a null seed.
+ const started = res.lobby;
+ await broadcastLobbyState(started.id, {
  type: "game-start",
- lobbyId: lobby.id,
- seed: lobby.seed,
- players: lobby.players,
- hostId: lobby.hostId,
- gameModule: lobby.gameId,
+ lobbyId: started.id,
+ seed: started.seed,
+ players: started.players,
+ hostId: started.hostId,
+ gameModule: started.gameId,
  // Host-configured timers chosen at lobby creation.
  settings: {
  votingTimeMin: lobby.votingTimeMin ?? 0.25,

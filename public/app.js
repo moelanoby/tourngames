@@ -1198,14 +1198,12 @@ function renderQuickLobbies(lobbyList) {
  }
 }
 
-function leaveCurrentLobby() {
- const lobbyId = state.currentLobbyId;
- if (lobbyId) {
- fb.leaveLobby(lobbyId).catch((e) => console.warn("[Firebase] leave failed:", e));
- }
+/** Clear local waiting-room state (no Firebase write). */
+function detachFromLobby() {
  if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch {} lobbyWatchUnsub = null; }
  state.currentLobbyId = null;
  lobbies.setCurrentLobbyId(null);
+ state.gameSettings = null;
  dom.lobbyWait.classList.add("hidden");
  dom.findMatchScreen.classList.remove("hidden");
  dom.findMatchBtn.classList.remove("hidden");
@@ -1213,6 +1211,23 @@ function leaveCurrentLobby() {
  if (quickLobbies) quickLobbies.classList.add("hidden");
  dom.playerInfo.textContent = state.playerName;
 }
+
+function leaveCurrentLobby() {
+ const lobbyId = state.currentLobbyId;
+ if (lobbyId) {
+ fb.leaveLobby(lobbyId).catch((e) => console.warn("[Firebase] leave failed:", e));
+ }
+ detachFromLobby();
+}
+
+// Leaving from the Lobbies detail view also detaches the game screen.
+window.addEventListener("tgn:left-lobby", (e) => {
+ const leftId = e.detail?.lobbyId;
+ if (leftId && leftId === state.currentLobbyId) {
+ detachFromLobby();
+ showToast("Left lobby", "info");
+ }
+});
 
 // ─── Handle incoming signaling messages ─────────────────────────────────────
 // FIXED: removed duplicate case blocks; properly handle {player} vs {players}.

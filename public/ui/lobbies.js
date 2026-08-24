@@ -69,6 +69,7 @@ function cacheDom() {
   dom.detailPlayers = document.getElementById("detail-players");
   dom.detailSignups = document.getElementById("detail-signups");
   dom.detailJoinBtn = document.getElementById("detail-join-btn");
+  dom.detailLeaveBtn = document.getElementById("detail-leave-btn");
   dom.detailInviteInput = document.getElementById("detail-invite-input");
   dom.detailJoinSection = document.getElementById("detail-join-section");
   dom.detailBackBtn = document.getElementById("detail-back-btn");
@@ -108,6 +109,9 @@ function bindEvents() {
   }
   if (dom.detailJoinBtn) {
     dom.detailJoinBtn.addEventListener("click", handleJoin);
+  }
+  if (dom.detailLeaveBtn) {
+    dom.detailLeaveBtn.addEventListener("click", handleLeave);
   }
   if (dom.detailSaveTimersBtn) {
     dom.detailSaveTimersBtn.addEventListener("click", handleSaveTimers);
@@ -329,12 +333,18 @@ function renderDetail(lobby) {
   // Signups section - hide for now (not needed for MVP)
   if (dom.detailSignups) dom.detailSignups.parentElement.classList.add("hidden");
 
-  // Join button
+  // Join / Leave buttons
   const user = getCurrentUser();
   const playerCount = lobby.players?.length || 0;
   const isFull = playerCount >= (lobby.maxPlayers || 10);
   const isPlaying = lobby.status === "playing" || lobby.status === "starting";
   const alreadyIn = user && lobby.players?.includes(user.uid);
+
+  if (dom.detailLeaveBtn) {
+    // Members can leave while the lobby is still waiting.
+    const canLeave = alreadyIn && !isPlaying;
+    dom.detailLeaveBtn.classList.toggle("hidden", !canLeave);
+  }
 
   if (dom.detailJoinBtn) {
     if (alreadyIn) {
@@ -421,6 +431,26 @@ async function handleJoin() {
     showToast("Joined lobby!", "success");
     // Let app.js attach to this lobby (waiting room UI + game-start watcher).
     window.dispatchEvent(new CustomEvent("tgn:joined-lobby", { detail: lobby }));
+  } catch (e) {
+    showToast(e.message, "error");
+  }
+}
+
+/**
+ * Leave the lobby currently open in the detail view (while waiting).
+ * Notifies app.js so the game-screen waiting room detaches too.
+ */
+async function handleLeave() {
+  if (!currentDetailLobbyId) return;
+  const user = getCurrentUser();
+  if (!user) {
+    showToast("Log in first", "error");
+    return;
+  }
+  try {
+    await fbLeaveLobby(currentDetailLobbyId);
+    showToast("Left lobby", "info");
+    window.dispatchEvent(new CustomEvent("tgn:left-lobby", { detail: { lobbyId: currentDetailLobbyId } }));
   } catch (e) {
     showToast(e.message, "error");
   }

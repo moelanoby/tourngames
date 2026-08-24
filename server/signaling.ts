@@ -79,6 +79,7 @@ function buildIceConfig() {
 
  const turnUrl = Deno.env.get("TURN_SERVER_URL");
  if (turnUrl) {
+ // Real TURN credentials from env (Metered / Cloudflare / self-hosted coturn).
  const turnUser = Deno.env.get("TURN_USERNAME") || "";
  const turnCred = Deno.env.get("TURN_CREDENTIAL") || "";
  iceServers.push({
@@ -86,6 +87,16 @@ function buildIceConfig() {
  username: turnUser,
  credential: turnCred,
  });
+ } else {
+ // No env config: fall back to free Open Relay Project TURN so strict
+ // NATs still connect during development.
+ for (const urls of [
+ "turn:openrelay.metered.ca:80",
+ "turn:openrelay.metered.ca:443",
+ "turn:openrelay.metered.ca:443?transport=tcp",
+ ]) {
+ iceServers.push({ urls, username: "openrelayproject", credential: "openrelayproject" });
+ }
  }
 
  return { iceServers };

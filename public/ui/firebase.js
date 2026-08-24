@@ -508,6 +508,55 @@ export async function saveGameState(lobbyId, gameState) {
   });
 }
 
+/** Client -> host input relay for players whose P2P channel failed. */
+export async function writeLobbyInput(lobbyId, playerId, input) {
+  if (!initialized) initFirebase();
+  await set(ref(db, `games/${lobbyId}/inputs/${playerId}`), input);
+}
+
+/** Host: live feed of relayed inputs keyed by player id. */
+export function onLobbyInputs(lobbyId, callback) {
+  if (!initialized) initFirebase();
+  const inputsRef = ref(db, `games/${lobbyId}/inputs`);
+  return onValue(inputsRef, (snapshot) => {
+    const inputs = {};
+    snapshot.forEach((child) => { inputs[child.key] = child.val(); });
+    callback(inputs);
+  });
+}
+
+/** Host: remove a consumed relayed input so it isn't reprocessed. */
+export async function clearLobbyInput(lobbyId, playerId) {
+  if (!initialized) initFirebase();
+  await remove(ref(db, `games/${lobbyId}/inputs/${playerId}`));
+}
+
+/** Host: publish the match result so non-P2P clients see it too. */
+export async function writeMatchOver(lobbyId, winnerId, winnerName) {
+  if (!initialized) initFirebase();
+  await set(ref(db, `games/${lobbyId}/over`), { winner: winnerId, winnerName, at: serverTimestamp() });
+}
+
+/** Client: watch for the match result (fallback when P2P is down). */
+export function onMatchOver(lobbyId, callback) {
+  if (!initialized) initFirebase();
+  const overRef = ref(db, `games/${lobbyId}/over`);
+  const handler = onValue(overRef, (snapshot) => {
+    if (snapshot.exists()) {
+      off(overRef, "value", handler);
+      const val = snapshot.val();
+      callback(val.winner, val.winnerName);
+    }
+  });
+  return () => off(overRef);
+}
+
+/** Clear per-lobby game relay data (called by the host at match start). */
+export async function clearLobbyGame(lobbyId) {
+  if (!initialized) initFirebase();
+  try { await remove(ref(db, `games/${lobbyId}`)); } catch { /* ignore */ }
+}
+
 export function onGameState(lobbyId, callback) {
   if (!initialized) initFirebase();
   const gameRef = ref(db, `games/${lobbyId}/state`);

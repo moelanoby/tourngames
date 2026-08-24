@@ -50,12 +50,25 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const TICK_RATE_MS = 16.67;
-const P2P_TIMEOUT_MS = 4000; // Fallback: start game via WS relay after 4s if P2P not ready
+const P2P_TIMEOUT_MS = 4000;
+
+// STUN alone fails on strict/symmetric NATs ("WebRTC: ICE failed"), so we
+// route through TURN relays as well. These are the free Open Relay Project
+// credentials - fine for testing, swap in your own Metered/Cloudflare/Xirsys
+// credentials for production via window.TURN_CONFIG = { iceServers: [...] }.
+const TURN_SERVERS = [
+ { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+ { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+ { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+];
 const ICE_CONFIG_DEFAULT = {
  iceServers: [
  { urls: "stun:stun.l.google.com:19302" },
  { urls: "stun:stun1.l.google.com:19302" },
+ ...(window.TURN_CONFIG && Array.isArray(window.TURN_CONFIG.iceServers)
+ ? window.TURN_CONFIG.iceServers : TURN_SERVERS),
  ],
+ iceCandidatePoolSize: 4,
 };
 
 
@@ -796,6 +809,25 @@ class GameManager {
  this.tick = 0;
  this.recordedInputs = {};
 
+ // Fresh Firebase relay for players whose P2P failed.
+ if (state.currentLobbyId) {
+ fb.clearLobbyGame(state.currentLobbyId).catch(() => {});
+ if (this.lobbyInputsUnsub) { try { this.lobbyInputsUnsub(); } catch {} }
+ const lobbyId = state.currentLobbyId;
+ this.lobbyInputsUnsub = fb.onLobbyInputs(lobbyId, (inputs) => {
+ // Feed each relayed input into the host simulation, then delete it
+ // so it isn't processed twice on the next snapshot.
+ let consumed = false;
+ for (const [pid, input] of Object.entries(inputs)) {
+ if (!input || !state.players.some((p) => p.id === pid)) continue;
+ if (pid === state.playerId) { fb.clearLobbyInput(lobbyId, pid).catch(() => {}); continue; }
+ this.pendingInputs[pid] = input;
+ consumed = true;
+ fb.clearLobbyInput(lobbyId, pid).catch(() => {});
+ }
+ });
+ }
+
  for (const p of state.players) {
  this.recordedInputs[p.id] = [];
  }
@@ -861,12 +893,17 @@ class GameManager {
  _broadcastState() {
  if (!this.state) return;
  const payload = { type: "game-state", state: this.state, tick: this.tick };
- // ─── P2P mesh only no server relay ───
- // The host broadcasts state to all peers via WebRTC data channels.
- // If a direct connection fails, the mesh routing layer relays through
- // other connected peers. The server never sees game state.
+ // Primary path: WebRTC data channels (direct or mesh-relayed).
  if (state.p2pClient) {
  state.p2pClient.broadcast(payload);
+ }
+ // Fallback path: mirror state into Firebase so players whose ICE
+ // negotiation failed still receive the game. Throttled to >=250ms
+ // between writes (chess ticks are 500ms; fast games get throttled).
+ const now = Date.now();
+ if (state.currentLobbyId && now - (this._lastFbStateWrite || 0) >= 250) {
+ this._lastFbStateWrite = now;
+ fb.saveGameState(state.currentLobbyId, this.state).catch(() => {});
  }
  }
 
@@ -886,6 +923,10 @@ class GameManager {
  if (state.p2pClient) state.p2pClient.broadcast(payload);
  // Report match result to server (stats only no game-state relay)
  sendToServer({ type: "match-over", winner: winnerId, winnerName: winnerName });
+ // Relay the result through Firebase for non-P2P clients.
+ if (state.currentLobbyId) {
+ fb.writeMatchOver(state.currentLobbyId, winnerId, winnerName).catch(() => {});
+ }
 
  // Compile and save replay LOCALLY (not uploaded to the server).
  const replay = this.module.compileReplay(
@@ -919,6 +960,8 @@ class GameManager {
 
  // Client: start receiving and rendering state
  startClientGame() {
+ // Firebase state mirror as fallback in case P2P to the host fails.
+ this.subscribeToFirebaseState();
  this._renderLoop();
  }
 
@@ -957,6 +1000,30 @@ class GameManager {
  receiveState(newState, tick) {
  this.state = newState;
  this.tick = tick;
+ }
+
+ /**
+  * Non-hosts: subscribe to the Firebase state mirror as a fallback for
+  * when the WebRTC channel to the host never opens (ICE failed).
+  */
+ subscribeToFirebaseState() {
+ if (this.fbStateUnsub || !state.currentLobbyId) return;
+ const lobbyId = state.currentLobbyId;
+ this.fbStateUnsub = fb.onGameState(lobbyId, (saved) => {
+ if (state.isHost || !saved) return;
+ // Prefer P2P when it is connected; mirror is only a safety net.
+ const dc = state.p2pClient && state.p2pClient.channels.get(state.hostId);
+ if (dc && dc.readyState === "open") return;
+ if (state.gameStarted && !state.matchEnded) {
+ this.receiveState(saved, saved.tick || 0);
+ }
+ });
+ // Also watch for the match result over the relay.
+ this.fbOverUnsub = fb.onMatchOver(lobbyId, (winner, winnerName) => {
+ if (!state.isHost && state.gameStarted && !state.matchEnded) {
+ this.receiveMatchOver(winner, winnerName);
+ }
+ });
  }
 
  receiveMatchOver(winnerId, winnerName) {
@@ -1009,9 +1076,13 @@ class GameManager {
 
  const input = this.module.getLocalInput(this.keys);
  if (input && (input.jump || input.action)) {
- const payload = { type: "input", playerId: state.playerId, input: input };
- if (state.p2pClient) {
- state.p2pClient.sendToPeer(state.hostId, payload);
+ const dc = state.p2pClient && state.p2pClient.channels.get(state.hostId);
+ const directOpen = dc && dc.readyState === "open";
+ if (directOpen) {
+ state.p2pClient.sendToPeer(state.hostId, { type: "input", playerId: state.playerId, input });
+ } else if (state.currentLobbyId) {
+ // Our ICE negotiation failed: relay the input through Firebase.
+ fb.writeLobbyInput(state.currentLobbyId, state.playerId, input).catch(() => {});
  }
  }
  }

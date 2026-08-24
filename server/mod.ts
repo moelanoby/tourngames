@@ -123,9 +123,9 @@ async function serveStaticFile(urlPath: string): Promise<Response> {
  try {
  const content = await Deno.readTextFile(filePath);
   // Extract extension from the actual filename (handle file:// URLs and query strings)
-  const urlPathForExt = urlPath.split("?")[0]; // strip query string
+  const urlPathForExt = urlPath.split("?")[0] ?? "";
   const extMatch = urlPathForExt.match(/\.[a-zA-Z0-9]+$/);
-  const ext = extMatch ? "." + extMatch[1].toLowerCase() : "";
+  const ext = extMatch?.[1] ? "." + extMatch[1].toLowerCase() : "";
   const mime = MIME_TYPES[ext] || "application/octet-stream";
  // Only cache binary assets (images, fonts) that don't change.
  const cacheControl = (ext === ".html" || ext === ".js" || ext === ".css" || ext === ".mjs")
@@ -598,7 +598,7 @@ async function handleGameConfigApi(): Promise<Response> {
 async function handleApi(req: Request, urlPath: string): Promise<Response> {
   console.log("[DEBUG] handleApi:", urlPath);
  const [resource, ...rest] = urlPath.split("/");
- const action = rest.join("/");
+ let action = rest.join("/");
   // Normalize: strip trailing slash and query string
   if (action.endsWith("/")) action = action.slice(0, -1);
   const qIdx = action.indexOf("?");

@@ -410,13 +410,21 @@ export function updateGameState(state, inputs, dt) {
  // Validate move
  if (isLegalMove(data.board, input.from, input.to, team)) {
  // Remove any existing proposal by this player
+ const moveKey = JSON.stringify([input.from, input.to]);
+ const isNewMove = !data.proposals.some(
+ (p) => JSON.stringify([p.from, p.to]) === moveKey
+ );
  data.proposals = data.proposals.filter((p) => p.playerId !== playerId);
- // Dynamic vote timer: a fresh proposal guarantees the team at least
- // half of the base vote time to react (capped at the full base).
+ // Dynamic vote timer: a FRESH move guarantees the team at least half
+ // of the base vote time to react (capped at the full base). Re-proposing
+ // an identical move must NOT refresh - otherwise continuous spam would
+ // push phaseDeadline forward forever and the turn could never end.
+ if (isNewMove) {
  const refreshFloor = state.timestamp + data.votingDurationMs * VOTE_REFRESH_FRACTION;
  const refreshCap = state.timestamp + data.votingDurationMs;
  if (!data.quorumExecAt && refreshFloor > data.phaseDeadline) {
  data.phaseDeadline = Math.min(refreshFloor, refreshCap);
+ }
  }
  const proposal = {
  id: toAlgebraic(input.from) + "-" + toAlgebraic(input.to) + "-" + playerId.slice(0, 4),
@@ -497,11 +505,15 @@ function executeTopMove(state) {
  return;
  }
 
- // Sort by votes, pick from tied set randomly
+ // Sort by votes, pick from the tied set with a SEEDED PRNG derived from
+ // (seed, turnNumber). Must NOT use Math.random: loadReplay re-simulates
+ // the recorded inputs and has to reproduce the exact same move.
  const sorted = [...data.proposals].sort((a, b) => b.votes - a.votes);
  const topVotes = sorted[0].votes;
  const tied = sorted.filter((p) => p.votes === topVotes);
- const winner = tied[Math.floor(Math.random() * tied.length)];
+ let prng = ((state.seed >>> 0) ^ Math.imul(data.turnNumber, 2654435761)) >>> 0;
+ prng = (Math.imul(prng, 1103515245) + 12345) & 0x7fffffff;
+ const winner = tied[prng % tied.length];
 
  // Execute the move
  const [fr, fc] = winner.from;
@@ -549,6 +561,7 @@ function switchTurn(state) {
  data.proposals = [];
  data.playerVotes = {};
  data.quorumExecAt = null;
+ data.lastProposedMove = null;
  data.turnNumber++;
 }
 

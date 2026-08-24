@@ -521,10 +521,15 @@ export function onChatMessages(lobbyId, callback) {
 
 export async function saveGameState(lobbyId, gameState) {
   if (!initialized) initFirebase();
-  await set(ref(db, `games/${lobbyId}/state`), {
-    ...gameState,
-    updatedAt: serverTimestamp()
-  });
+  // Store the state as ONE opaque base64 JSON string. RTDB strips null
+  // values from arrays on write (the chess board is 64 cells that are
+  // mostly null), which deletes board rows and corrupts raw states.
+  // A single string is something the database cannot mangle; onGameState
+  // decodes it. Legacy plain-object nodes still decode as before.
+  const json = btoa(unescape(encodeURIComponent(JSON.stringify(gameState))));
+  // updatedAt stays top-level: the dead-relay sweeper reads
+  // games/{id}/state/updatedAt to drop abandoned matches.
+  await set(ref(db, `games/${lobbyId}/state`), { json, updatedAt: serverTimestamp() });
 }
 
 /** Client -> host input relay for players whose P2P channel failed. */

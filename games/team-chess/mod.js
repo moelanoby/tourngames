@@ -327,7 +327,7 @@ export function handleClick(x, y, playerId, state) {
 
  // If no selection, select a piece of our team
  if (!selectedSquare) {
- const piece = data.board[r][c];
+ const piece = data.board?.[r]?.[c];
  if (piece && piece.color === team) {
  selectedSquare = [r, c];
  legalMovesForSelected = getLegalMoves(data.board, [r, c], team);
@@ -345,7 +345,7 @@ export function handleClick(x, y, playerId, state) {
  }
 
  // Another own piece switch selection
- const piece = data.board[r][c];
+ const piece = data.board?.[r]?.[c];
  if (piece && piece.color === team) {
  selectedSquare = [r, c];
  legalMovesForSelected = getLegalMoves(data.board, [r, c], team);
@@ -637,7 +637,7 @@ export function render(ctx, state, localPlayerId, w, h) {
  const cx = ox + mc * squareSize + squareSize / 2;
  const cy = oy + mr * squareSize + squareSize / 2;
  // If there's an enemy piece, draw a ring instead of a dot
- if (data.board[mr][mc]) {
+ if (data.board?.[mr]?.[mc]) {
  ctx.strokeStyle = "rgba(184, 84, 50, 0.6)";
  ctx.lineWidth = 4;
  ctx.beginPath();
@@ -660,10 +660,13 @@ export function render(ctx, state, localPlayerId, w, h) {
  ctx.strokeRect(ox + c * squareSize + 2, oy + r * squareSize + 2, squareSize - 4, squareSize - 4);
  }
 
- // Draw pieces
+ // Draw pieces (row/cell guards: never crash the render loop on a
+ // partially-delivered state - just skip the missing cells)
  for (let r = 0; r < 8; r++) {
+ const row = data.board && data.board[r];
+ if (!Array.isArray(row)) continue;
  for (let c = 0; c < 8; c++) {
- const piece = data.board[r][c];
+ const piece = row[c];
  if (!piece) continue;
  const x = ox + c * squareSize;
  const y = oy + r * squareSize;

@@ -17,16 +17,16 @@
  * - Signups: reserve slots in signup-type lobbies
  */
 
-import * as auth from "./ui/auth.js?v=20260924c";
-import * as fb from "./ui/firebase.js?v=20260924c";
-import * as lobbies from "./ui/lobbies.js?v=20260924c";
-import * as admin from "./ui/admin.js?v=20260924c";
+import * as auth from "./ui/auth.js?v=20260924d";
+import * as fb from "./ui/firebase.js?v=20260924d";
+import * as lobbies from "./ui/lobbies.js?v=20260924d";
+import * as admin from "./ui/admin.js?v=20260924d";
 import {
  saveLocalReplay,
  loadLocalReplays,
  renameLocalReplay,
-} from "./ui/local-archive.js?v=20260924c";
-import * as cookies from "./ui/cookies.js?v=20260924c";
+} from "./ui/local-archive.js?v=20260924d";
+import * as cookies from "./ui/cookies.js?v=20260924d";
 
 // ─── Polyfills ───────────────────────────────────────────────────────────────
 
@@ -789,7 +789,7 @@ class GameManager {
 
  async loadGameModule(gameModulePath) {
  showLoading("Loading game module...");
- const mod = await import("./" + gameModulePath + "?v=20260924c");
+ const mod = await import("./" + gameModulePath + "?v=20260924d");
  this.module = mod.default || mod;
  return this.module;
  }

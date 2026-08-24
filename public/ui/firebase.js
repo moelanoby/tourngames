@@ -416,6 +416,13 @@ export function onLobbyListChange(callback) {
   return () => off(q);
 }
 
+/** One-shot lobby read (used by the polling fallback for match start). */
+export async function getLobbyOnce(lobbyId) {
+  if (!initialized) initFirebase();
+  const snapshot = await get(ref(db, `lobbies/${lobbyId}`));
+  return snapshot.exists() ? snapshot.val() : null;
+}
+
 export function onLobbyChange(lobbyId, callback) {
   const lobbyRef = ref(db, `lobbies/${lobbyId}`);
   onValue(lobbyRef, (snapshot) => {

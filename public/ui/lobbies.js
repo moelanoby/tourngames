@@ -412,8 +412,11 @@ async function handleSaveTimers() {
 async function handleStartMatch() {
   if (!currentDetailLobbyId) return;
   try {
-    await fbStartMatch(currentDetailLobbyId);
+    const lobby = await fbStartMatch(currentDetailLobbyId);
     showToast("Starting match...", "success");
+    // The host starts locally and instantly - no listener round-trip.
+    // Other members launch via their lobby watchers / poll fallback.
+    window.dispatchEvent(new CustomEvent("tgn:match-start", { detail: lobby }));
   } catch (e) {
     showToast(e.message, "error");
   }

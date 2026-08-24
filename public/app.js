@@ -1379,25 +1379,58 @@ function handleSignalingMessage(msg) {
 // watches the lobby record and starts the game locally when it flips.
 
 let lobbyWatchUnsub = null;
+let lobbyPollTimer = null;
+let lastSeenStatus = null;
 
-function attachLobbyWatcher(lobbyId) {
- if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch {} lobbyWatchUnsub = null; }
- if (!lobbyId) return;
- lobbyWatchUnsub = fb.onLobbyChange(lobbyId, (lobby) => {
+function onLobbySnapshot(lobby) {
+ try {
  if (!lobby) return;
  // Keep the waiting room UI fresh while we wait.
- if (!state.gameStarted && !state.matchEnded) {
+ if (!state.gameStarted && !state.matchEnded
+ && lobby.status === "waiting") {
  handleLobbyStateUpdate(lobby);
  }
  // Host pressed start (or auto-start): everyone launches locally.
- if ((lobby.status === "starting" || lobby.status === "playing") &&
- !state.gameStarted && !state.matchEnded) {
+ const starting = lobby.status === "starting" || lobby.status === "playing";
+ if (starting && !state.gameStarted && !state.matchEnded) {
  startFirebaseMatch(lobby);
  }
- });
+ } catch (e) {
+ console.error("[Lobby] snapshot handling failed:", e);
+ }
+ lastSeenStatus = lobby ? lobby.status : null;
+}
+
+function attachLobbyWatcher(lobbyId) {
+ if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch {} lobbyWatchUnsub = null; }
+ if (lobbyPollTimer) { clearInterval(lobbyPollTimer); lobbyPollTimer = null; }
+ lastSeenStatus = null;
+ if (!lobbyId) return;
+
+ // Live updates via Firebase listener...
+ lobbyWatchUnsub = fb.onLobbyChange(lobbyId, onLobbySnapshot);
+
+ // ...plus a polling fallback so a missed/dropped listener can never
+ // leave players stuck on "starting" forever.
+ lobbyPollTimer = setInterval(async () => {
+ if (state.gameStarted || state.matchEnded || !state.currentLobbyId) {
+ clearInterval(lobbyPollTimer);
+ lobbyPollTimer = null;
+ return;
+ }
+ try {
+ const lobby = await fb.getLobbyOnce(state.currentLobbyId);
+ if (lobby && lobby.status !== lastSeenStatus) onLobbySnapshot(lobby);
+ } catch { /* transient network error - next tick retries */ }
+ }, 2500);
 }
 
 function startFirebaseMatch(lobby) {
+ if (!lobby || state.gameStarted || state.matchEnded) return;
+ state.gameSettings = {
+ votingTimeMin: lobby.votingTimeMin ?? 0.25,
+ matchTimeMin: lobby.matchTimeMin ?? 10,
+ };
  const names = lobby.playerNames || {};
  const players = (lobby.players || []).map((uid) => ({
  id: uid,
@@ -1422,6 +1455,13 @@ function startFirebaseMatch(lobby) {
  window.location.hash = "#/game";
  }
 }
+
+// Host pressed Start in the Lobbies detail view: launch immediately with
+// the returned lobby data instead of waiting for a listener callback.
+window.addEventListener("tgn:match-start", (e) => {
+ const lobby = e.detail;
+ if (lobby && lobby.id === state.currentLobbyId) startFirebaseMatch(lobby);
+});
 
 // Lobbies page join flow notifies us so we attach to the lobby.
 window.addEventListener("tgn:joined-lobby", (e) => {
@@ -2314,8 +2354,10 @@ async function main() {
  return;
  }
  try {
- await fb.startMatch(state.currentLobbyId);
+ const lobby = await fb.startMatch(state.currentLobbyId);
  showToast("Starting match...", "info");
+ // Host starts locally right away; members use their watchers/polling.
+ if (lobby) startFirebaseMatch(lobby);
  } catch (e) {
  showToast(e.message, "error");
  }

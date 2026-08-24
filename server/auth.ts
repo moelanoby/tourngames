@@ -220,6 +220,14 @@ export function getLockoutRemaining(user: User): number {
 }
 
 export async function recordFailedLogin(user: User): Promise<User> {
+ // A lockout that already expired must not count toward the new attempt:
+ // otherwise the stale counter (>= MAX_FAILED_ATTEMPTS) re-locks the
+ // account on every single wrong password - a permanent 1-request/15min
+ // DoS for anyone who knows the username.
+ if (user.lockedUntil && user.lockedUntil < Date.now()) {
+ user.failedLoginAttempts = 0;
+ user.lockedUntil = null;
+ }
  user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
  if (user.failedLoginAttempts >= MAX_FAILED_ATTEMPTS) {
  user.lockedUntil = Date.now() + LOCKOUT_DURATION_MS;

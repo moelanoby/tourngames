@@ -17,16 +17,16 @@
  * - Signups: reserve slots in signup-type lobbies
  */
 
-import * as auth from "./ui/auth.js?v=20260924e";
-import * as fb from "./ui/firebase.js?v=20260924e";
-import * as lobbies from "./ui/lobbies.js?v=20260924e";
-import * as admin from "./ui/admin.js?v=20260924e";
+import * as auth from "./ui/auth.js?v=20260924f";
+import * as fb from "./ui/firebase.js?v=20260924f";
+import * as lobbies from "./ui/lobbies.js?v=20260924f";
+import * as admin from "./ui/admin.js?v=20260924f";
 import {
  saveLocalReplay,
  loadLocalReplays,
  renameLocalReplay,
-} from "./ui/local-archive.js?v=20260924e";
-import * as cookies from "./ui/cookies.js?v=20260924e";
+} from "./ui/local-archive.js?v=20260924f";
+import * as cookies from "./ui/cookies.js?v=20260924f";
 
 // ─── Polyfills ───────────────────────────────────────────────────────────────
 
@@ -789,7 +789,7 @@ class GameManager {
 
  async loadGameModule(gameModulePath) {
  showLoading("Loading game module...");
- const mod = await import("./" + gameModulePath + "?v=20260924e");
+ const mod = await import("./" + gameModulePath + "?v=20260924f");
  this.module = mod.default || mod;
  return this.module;
  }
@@ -945,11 +945,15 @@ class GameManager {
  // Nothing is POSTed to the server, so each user only sees their own
  // matches in the Archive tab. The client auto-assigns "Match N" using
  // a localStorage counter if no title was set.
+ let savedReplay = null;
  try {
- saveLocalReplay(replay);
- showToast("Replay saved to your local archive", "success");
+ savedReplay = saveLocalReplay(replay);
  } catch (e) {
  console.error("[Archive] Failed to save local replay:", e);
+ }
+ if (savedReplay) {
+ showToast("Replay saved to your local archive", "success");
+ } else {
  showToast("Failed to save replay (localStorage full or disabled)", "error");
  }
 
@@ -1002,10 +1006,21 @@ class GameManager {
  receiveState(newState, tick) {
  // Reject anything that isn't a complete game state (legacy RTDB-mangled
  // nodes had proposals/board stripped by the database).
- const okBoard = newState && newState.data && Array.isArray(newState.data.board)
+ //
+ // Shape validation is module-aware: the active module may expose
+ // validateState(); otherwise fall back to requiring data + an 8x8 board
+ // WHEN one is present (keeps team-chess protected without hard-coding
+ // chess for every future game module).
+ let okState = Boolean(newState && newState.data && typeof newState.data === "object");
+ if (okState && newState.data.board !== undefined) {
+ okState = Array.isArray(newState.data.board)
  && newState.data.board.length === 8
  && newState.data.board.every((row) => Array.isArray(row) && row.length === 8);
- if (!okBoard) {
+ }
+ if (okState && typeof this.module.validateState === "function") {
+ try { okState = this.module.validateState(newState); } catch { okState = false; }
+ }
+ if (!okState) {
  console.warn("[GameManager] rejected malformed game state");
  return;
  }
@@ -1024,9 +1039,14 @@ class GameManager {
  const lobbyId = state.currentLobbyId;
  this.fbStateUnsub = fb.onGameState(lobbyId, (saved) => {
  if (state.isHost || !saved) return;
+ // Ignore snapshots for a lobby we already left.
+ if (state.currentLobbyId !== lobbyId) return;
  // Prefer P2P when it is connected; mirror is only a safety net.
  const dc = state.p2pClient && state.p2pClient.channels.get(state.hostId);
  if (dc && dc.readyState === "open") return;
+ // Don't let a delayed mirror delivery regress fresher P2P state.
+ const p2pFresh = this._lastP2PAt && Date.now() - this._lastP2PAt < 2000;
+ if (p2pFresh && (saved.tick || 0) <= (this.tick || 0)) return;
  if (state.gameStarted && !state.matchEnded) {
  this.receiveState(saved, saved.tick || 0);
  }
@@ -1148,6 +1168,12 @@ class GameManager {
  cancelAnimationFrame(this.renderFrameId);
  this.renderFrameId = null;
  }
+ // Tear down Firebase fallback listeners: keeping them would both disable
+ // the fallback for the NEXT match (subscribeToFirebaseState early-returns
+ // while fbStateUnsub is set) and let stale old-lobby state/match-over
+ // snapshots leak into the new match.
+ if (this.fbStateUnsub) { try { this.fbStateUnsub(); } catch {} this.fbStateUnsub = null; }
+ if (this.fbOverUnsub) { try { this.fbOverUnsub(); } catch {} this.fbOverUnsub = null; }
 
  this.hideEliminated();
  dom.viewReplayBtn.classList.add("hidden");
@@ -1286,6 +1312,8 @@ function renderQuickLobbies(lobbyList) {
 function detachFromLobby() {
  if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch {} lobbyWatchUnsub = null; }
  if (chatUnsub) { try { chatUnsub(); } catch {} chatUnsub = null; }
+ // Stop receiving stale WebRTC signals targeted at the old lobby.
+ if (signalsUnsub) { try { signalsUnsub(); } catch {} signalsUnsub = null; }
  state.currentLobbyId = null;
  lobbies.setCurrentLobbyId(null);
  state.gameSettings = null;
@@ -1739,8 +1767,10 @@ function displayChatMessage(playerName, message, channel, senderTeam) {
 
  const div = document.createElement("div");
  div.className = "chat-message";
+ // senderTeam is client-supplied metadata (RTDB/P2P) - MUST be escaped.
+ const safeTeam = escapeHTML(String(senderTeam));
  const teamBadge = senderTeam
- ? ' <span class="badge ' + (senderTeam === "white" ? "badge-default" : "badge-accent") + '" style="font-size: 9px; padding: 1px 4px;">' + senderTeam + "</span>"
+ ? ' <span class="badge ' + (senderTeam === "white" ? "badge-default" : "badge-accent") + '" style="font-size: 9px; padding: 1px 4px;">' + safeTeam + "</span>"
  : "";
  div.innerHTML = '<span class="chat-author">' + escapeHTML(playerName) + "</span>" + teamBadge + ": " + escapeHTML(message);
  chatMessages.appendChild(div);
@@ -2017,6 +2047,7 @@ function setupP2P() {
  }
  } else {
  if (msg.type === "game-state") {
+ gameMgr._lastP2PAt = Date.now();
  gameMgr.receiveState(msg.state, msg.tick);
  }
  if (msg.type === "match-over") {
@@ -2192,7 +2223,9 @@ async function playReplay(replay) {
  if (gameMgr.module && gameMgr.module.metadata?.id === moduleId) {
  mod = gameMgr.module;
  } else {
- const imported = await import("./" + gameModulePath);
+ // Same specifier as loadGameModule() - a mismatched URL would evaluate
+ // the module twice, splitting its mutable state (pendingInput etc.).
+ const imported = await import("./" + gameModulePath + "?v=20260924f");
  mod = imported.default || imported;
  }
  } catch (e) {
@@ -2270,7 +2303,11 @@ async function playReplay(replay) {
  playPauseBtn.textContent = "▶ PLAY";
  });
 
+ let rafId = null;
  function render(timestamp) {
+ // Stop the loop once the viewer canvas is removed from the DOM (new
+ // playback or navigating away), instead of accumulating dead rAF loops.
+ if (!canvas.isConnected) return;
  if (!lastTime) lastTime = timestamp;
  const deltaTime = timestamp - lastTime;
 
@@ -2284,12 +2321,12 @@ async function playReplay(replay) {
  mod.render(ctx, s, null, canvas.width, canvas.height);
  }
 
- frameEl.textContent = frame + 1;
- scrub.value = frame;
+ frameEl.isConnected && (frameEl.textContent = frame + 1);
+ scrub.isConnected && (scrub.value = frame);
 
- requestAnimationFrame(render);
+ rafId = requestAnimationFrame(render);
  }
- requestAnimationFrame(render);
+ rafId = requestAnimationFrame(render);
 }
 
 function formatDuration(ms) {

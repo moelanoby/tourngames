@@ -36,7 +36,8 @@ import {
   query,
   orderByChild,
   equalTo,
-  limitToLast
+  limitToLast,
+  runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 // ─── Initialize Firebase ─────────────────────────────────────────────────────
@@ -100,6 +101,9 @@ export async function registerWithPassword(email, password, displayName) {
 
 export async function signOutUser() {
   if (!initialized) initFirebase();
+  // Remove presence + stop heartbeat before the auth listener flips to
+  // signed-out, so other users do not see a ghost "online" entry.
+  cleanup();
   await signOut(auth);
 }
 
@@ -122,8 +126,12 @@ export function startAuthListener() {
 // ─── Presence (Online Users) ────────────────────────────────────────────────
 
 let myPresenceRef = null;
+let presenceHeartbeat = null;
 
 function setupPresence(uid, displayName) {
+  // Guard against re-runs stacking intervals (every auth-state change used
+  // to create a new 30s timer that was never cleared).
+  if (presenceHeartbeat) { clearInterval(presenceHeartbeat); presenceHeartbeat = null; }
   myPresenceRef = ref(db, `presence/${uid}`);
   const presenceData = {
     uid,
@@ -141,7 +149,7 @@ function setupPresence(uid, displayName) {
   onDisconnect(myPresenceRef).remove();
 
   // Update lastSeen periodically
-  setInterval(() => {
+  presenceHeartbeat = setInterval(() => {
     if (myPresenceRef) {
       update(myPresenceRef, { lastSeen: serverTimestamp() });
     }
@@ -200,26 +208,45 @@ export async function createLobby(lobbyData) {
 export async function joinLobby(lobbyId) {
   if (!initialized) initFirebase();
   const lobbyRef = ref(db, `lobbies/${lobbyId}`);
-  const snapshot = await get(lobbyRef);
-  if (!snapshot.exists()) throw new Error("Lobby not found");
+
+  // Atomic read-modify-write: a get()-then-update() race let two concurrent
+  // joins clobber each other's players array, and capacity was never
+  // enforced here. runTransaction serializes both.
+  const { committed, snapshot } = await runTransaction(lobbyRef, (lobby) => {
+    if (!lobby || typeof lobby !== "object") return null; // abort: gone
+    if (lobby.status !== "waiting") return null;
+    const players = Array.isArray(lobby.players) ? lobby.players : [];
+    if (!players.includes(currentUser.uid)) {
+      const max = Number.isFinite(lobby.maxPlayers) ? lobby.maxPlayers : 20;
+      if (players.length >= max) return null; // full
+    }
+    return {
+      ...lobby,
+      players: players.includes(currentUser.uid)
+        ? players
+        : [...players, currentUser.uid],
+      playerNames: {
+        ...(lobby.playerNames || {}),
+        [currentUser.uid]: currentUser.displayName || "Anonymous",
+      },
+      updatedAt: serverTimestamp(),
+    };
+  });
 
   const lobby = snapshot.val();
-  if (lobby.status !== "waiting") throw new Error("Lobby not joinable");
-  if (lobby.players.includes(currentUser.uid)) return lobby; // Already in
+  if (!lobby) throw new Error("Lobby not found");
 
-  const updatedPlayers = [...lobby.players, currentUser.uid];
-  const updatedNames = { ...lobby.playerNames, [currentUser.uid]: currentUser.displayName || "Anonymous" };
-
-  await update(lobbyRef, {
-    players: updatedPlayers,
-    playerNames: updatedNames,
-    updatedAt: serverTimestamp()
-  });
+  if (!committed) {
+    // Transaction aborted: distinguish why for the caller.
+    if (lobby.status !== "waiting") throw new Error("Lobby not joinable");
+    const players = Array.isArray(lobby.players) ? lobby.players : [];
+    if (!players.includes(currentUser.uid)) throw new Error("Lobby is full");
+  }
 
   // Update user's presence
   updatePresence({ lobbyId, game: lobby.game });
 
-  return { ...lobby, players: updatedPlayers, playerNames: updatedNames };
+  return lobby;
 }
 
 export async function leaveLobby(lobbyId) {
@@ -458,7 +485,10 @@ export function onLobbyChange(lobbyId, callback) {
 
 export async function sendSignal(lobbyId, toUid, signalData) {
   if (!initialized) initFirebase();
-  const signalRef = ref(db, `signaling/${lobbyId}/${toUid}/incoming/${currentUser.uid}`);
+  // push() a unique child per signal: ICE bursts fire several candidates in
+  // milliseconds, and a fixed per-sender key would overwrite the previous
+  // unconsumed signal (a late candidate can even erase the offer itself).
+  const signalRef = push(ref(db, `signaling/${lobbyId}/${toUid}/incoming`));
   await set(signalRef, {
     from: currentUser.uid,
     fromName: currentUser.displayName || "Anonymous",
@@ -565,14 +595,17 @@ export async function writeMatchOver(lobbyId, winnerId, winnerName) {
 export function onMatchOver(lobbyId, callback) {
   if (!initialized) initFirebase();
   const overRef = ref(db, `games/${lobbyId}/over`);
-  const handler = onValue(overRef, (snapshot) => {
-    if (snapshot.exists()) {
-      off(overRef, "value", handler);
-      const val = snapshot.val();
-      callback(val.winner, val.winnerName);
-    }
+  // onValue returns an UNSUBSCRIBE function (modular SDK). Calling
+  // off(ref,"value",handler) with it matches nothing and leaks the listener.
+  let done = false;
+  const unsub = onValue(overRef, (snapshot) => {
+    if (done || !snapshot.exists()) return;
+    done = true;
+    unsub();
+    const val = snapshot.val();
+    callback(val.winner, val.winnerName);
   });
-  return () => off(overRef);
+  return () => { done = true; unsub(); };
 }
 
 /** Clear per-lobby game relay data (called by the host at match start). */

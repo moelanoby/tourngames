@@ -49,8 +49,11 @@ export async function createLobby(opts: {
  const safeType: LobbyType = ["open", "signup", "private"].includes(opts.type as string) ? opts.type as LobbyType : "open";
  const safeMax = typeof opts.maxPlayers === "number" && !isNaN(opts.maxPlayers)
  ? Math.min(20, Math.max(2, Math.floor(opts.maxPlayers))) : 10;
- const safeMin = typeof opts.minPlayers === "number" && !isNaN(opts.minPlayers)
+ let safeMin = typeof opts.minPlayers === "number" && !isNaN(opts.minPlayers)
  ? Math.min(10, Math.max(2, Math.floor(opts.minPlayers))) : 2;
+ // min > max would create a lobby that can never start (start demands more
+ // players than may ever join) and lingers until the stale sweep.
+ if (safeMin > safeMax) safeMin = safeMax;
  // Game timers (minutes): vote time capped at 2 min; match time -1 =
  // unlimited, otherwise any positive duration the host wants.
  const rawVoting = typeof opts.votingTimeMin === "number" && !isNaN(opts.votingTimeMin)

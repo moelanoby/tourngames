@@ -444,7 +444,9 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  if (action && !action.includes("/") && req.method === "GET") {
  const lobby = await getLobby(action);
  if (!lobby) return json({ error: "Lobby not found" }, 404);
- return json({ lobby });
+ // Sanitized summary only: the raw lobby object leaked inviteCode (making
+ // the private-lobby gate worthless), players[].userId and signup lists.
+ return json({ lobby: lobbySummary(lobby) });
  }
 
  // ── Signup actions ──

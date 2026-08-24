@@ -116,12 +116,14 @@ export async function handleAdminApi(
  return json({ logs });
  }
 
- // ── User actions: /api/admin/users/:id/{ban,unban,promote,demote} ──
+ // ── User actions: /api/admin/users/:id/{ban,unban,promote,demote} and
+ // ── DELETE /api/admin/users/:id. parts.length === 2 is valid for DELETE
+ // (the id is the last segment; there is no trailing sub-action).
  if (action.startsWith("users/")) {
  const parts = action.split("/");
- if (parts.length < 3) return json({ error: "Invalid path" }, 404);
+ if (parts.length < 2) return json({ error: "Invalid path" }, 404);
  const userId = parts[1];
- const sub = parts[2];
+ const sub = parts[2] ?? "";
 
  const targetUser = await getUserById(userId!);
  if (!targetUser) return json({ error: "User not found" }, 404);

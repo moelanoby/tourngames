@@ -773,6 +773,16 @@ export function getPlayerStatus(state, playerId) {
  return "alive";
 }
 
+/**
+ * Client-side state-shape validation used by app.js receiveState().
+ * Rejects RTDB-mangled states (null-stripped board rows) before render.
+ */
+export function validateState(state) {
+ const board = state && state.data && state.data.board;
+ if (!Array.isArray(board) || board.length !== 8) return false;
+ return board.every((row) => Array.isArray(row) && row.length === 8);
+}
+
 export function isMatchOver(state) {
  return !state.running;
 }
@@ -897,4 +907,5 @@ export default {
  getWinner,
  compileReplay,
  loadReplay,
+ validateState,
 };

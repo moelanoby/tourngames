@@ -38,7 +38,7 @@ export async function createLobby(opts: {
  type?: LobbyType;
  maxPlayers?: number;
  minPlayers?: number;
- votingTimeSec?: number;
+ votingTimeMin?: number;
  matchTimeMin?: number;
 }): Promise<Lobby> {
  const lobbyId = generateId();
@@ -51,13 +51,14 @@ export async function createLobby(opts: {
  ? Math.min(20, Math.max(2, Math.floor(opts.maxPlayers))) : 10;
  const safeMin = typeof opts.minPlayers === "number" && !isNaN(opts.minPlayers)
  ? Math.min(10, Math.max(2, Math.floor(opts.minPlayers))) : 2;
- // Game timers: vote time per turn + total match time (0 = unlimited).
- const safeVotingSec = typeof opts.votingTimeSec === "number" && !isNaN(opts.votingTimeSec)
- ? Math.min(120, Math.max(5, Math.round(opts.votingTimeSec))) : 20;
- const safeMatchMinRaw = typeof opts.matchTimeMin === "number" && !isNaN(opts.matchTimeMin)
- ? Math.round(opts.matchTimeMin) : 10;
- const safeMatchMin = safeMatchMinRaw > 0
- ? Math.min(180, Math.max(1, safeMatchMinRaw)) : 0;
+ // Game timers (minutes): vote time capped at 2 min; match time -1 =
+ // unlimited, otherwise any positive duration the host wants.
+ const rawVoting = typeof opts.votingTimeMin === "number" && !isNaN(opts.votingTimeMin)
+ ? opts.votingTimeMin : 0.25;
+ const safeVotingMin = Math.min(2, Math.max(0.1, rawVoting));
+ const rawMatch = typeof opts.matchTimeMin === "number" && !isNaN(opts.matchTimeMin)
+ ? opts.matchTimeMin : 10;
+ const safeMatchMin = rawMatch > 0 ? Math.round(rawMatch) : -1;
 
  const lobby: Lobby = {
  id: lobbyId,
@@ -74,11 +75,12 @@ export async function createLobby(opts: {
  type: safeType,
  maxPlayers: safeMax,
  minPlayers: safeMin,
- votingTimeSec: safeVotingSec,
+ votingTimeMin: safeVotingMin,
  matchTimeMin: safeMatchMin,
  inviteCode: safeType === "private" ? generateInviteCode() : null,
  signups: [],
  startedAt: null,
+ updatedAt: Date.now(),
  };
  await kv.set(["lobby", lobbyId], lobby);
  return lobby;
@@ -106,6 +108,7 @@ export async function updateLobby(lobby: Lobby): Promise<void> {
  signedUpAt: typeof s.signedUpAt === "number" ? s.signedUpAt : Date.now(),
  }));
  }
+ lobby.updatedAt = Date.now();
  try {
  await kv.set(["lobby", lobby.id], lobby);
  } catch (e) {
@@ -162,8 +165,20 @@ export async function listLobbies(gameId?: string, includePrivate = false): Prom
  if (!lobby) continue;
  // Null-safe: old lobby entries may not have players array
  const players = Array.isArray(lobby.players) ? lobby.players : [];
- // Expire old empty lobbies
+ // Expire dead lobbies so they don't pile up:
+ //  - empty waiting rooms after 30 min idle
+ //  - any lobby idle for over 30 min (no writes at all)
+ //  - matches that started more than 2h ago (long over)
+ const lastActivity = Math.max(lobby.updatedAt || 0, lobby.createdAt || 0, lobby.startedAt || 0);
  if (lobby.status === "waiting" && players.length === 0 && now - (lobby.createdAt || 0) > LOBBY_TIMEOUT_MS) {
+ await kv.delete(["lobby", lobby.id]);
+ continue;
+ }
+ if (now - lastActivity > LOBBY_TIMEOUT_MS) {
+ await kv.delete(["lobby", lobby.id]);
+ continue;
+ }
+ if (lobby.status !== "waiting" && lobby.startedAt && now - lobby.startedAt > 2 * LOBBY_TIMEOUT_MS) {
  await kv.delete(["lobby", lobby.id]);
  continue;
  }

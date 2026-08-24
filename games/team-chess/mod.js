@@ -162,44 +162,49 @@ export function getLegalMoves(board, from, color) {
 
 // ─── Game State ──────────────────────────────────────────────────────────────
 
-// ─── Timers (host-configurable via lobby settings) ──────────────────────────
+// ─── Timers (host-configurable lobby settings) ──────────────────────────────
 //
-// Two independent timers:
-//  1. Vote timer  - seconds per turn for teams to propose/vote on a move.
-//  2. Match timer - total wall-clock time for the whole game. When it runs
-//     out, the team with the more valuable material wins (equal material
-//     is a draw).
+// Two independent host-controlled timers, both measured in MINUTES:
+//  1. Vote time  - votingTimeMin: how long a team has per turn to vote.
+//                  Capped at 2 minutes. Fractions allowed (0.25 = 15s).
+//  2. Match time - matchTimeMin: total wall-clock time for the whole game.
+//                  -1 = unlimited. When time runs out, the team with the
+//                  more valuable material wins (equal material = draw).
 //
-// Settings flow from the create-lobby form -> lobby record -> "game-start"
-// message -> createGameState options:
-//   { votingTimeSec: number (5-120, default 20), matchTimeMin: number (0-180, 0 = unlimited, default 10) }
-const DEFAULT_VOTING_MS = 20000;
+// Early execution: as soon as a proposal holds enough votes (a strict
+// majority of the moving team), a 15-second lock-in starts; when it
+// elapses the top-voted move is executed immediately instead of waiting
+// for the full vote timer.
+//
+// Settings flow from lobby creation -> "game-start" message ->
+// createGameState options: { votingTimeMin, matchTimeMin }
+const DEFAULT_VOTING_MIN = 0.25; // 15 seconds
 const MIN_VOTING_MS = 5000;
-const MAX_VOTING_MS = 120000;
-const DEFAULT_MATCH_MIN = 10;
-const MAX_MATCH_MIN = 180;
+const MAX_VOTING_MS = 120000; // hard cap: 2 minutes
+const QUORUM_EXEC_DELAY_MS = 15000; // 15s from "enough votes" to execution
 
 export function normalizeTimers(options) {
  const o = options || {};
 
- // Vote time per turn
- let votingMs = DEFAULT_VOTING_MS;
- if (typeof o.votingTimeSec === "number" && Number.isFinite(o.votingTimeSec)) {
- votingMs = o.votingTimeSec * 1000;
- } else if (typeof o.votingMs === "number" && Number.isFinite(o.votingMs)) {
+ // Vote time per turn (minutes, capped at 2)
+ let votingMs = DEFAULT_VOTING_MIN * 60000;
+ if (typeof o.votingTimeMin === "number" && Number.isFinite(o.votingTimeMin) && o.votingTimeMin > 0) {
+ votingMs = o.votingTimeMin * 60000;
+ } else if (typeof o.votingTimeSec === "number" && Number.isFinite(o.votingTimeSec) && o.votingTimeSec > 0) {
+ votingMs = o.votingTimeSec * 1000; // legacy replays stored seconds
+ } else if (typeof o.votingMs === "number" && Number.isFinite(o.votingMs) && o.votingMs > 0) {
  votingMs = o.votingMs;
  }
  votingMs = Math.min(MAX_VOTING_MS, Math.max(MIN_VOTING_MS, Math.round(votingMs)));
 
- // Total match time (null/0 = unlimited)
- let matchMin = DEFAULT_MATCH_MIN;
+ // Total match time (minutes). -1 (or any negative / 0 for legacy
+ // replays) means unlimited -> null internally.
+ let matchMs = null; // null = unlimited
  if (typeof o.matchTimeMin === "number" && Number.isFinite(o.matchTimeMin)) {
- matchMin = o.matchTimeMin;
+ matchMs = o.matchTimeMin > 0 ? Math.round(o.matchTimeMin * 60000) : null;
  } else if (typeof o.matchMs === "number" && Number.isFinite(o.matchMs)) {
- matchMin = o.matchMs / 60000;
+ matchMs = o.matchMs > 0 ? Math.round(o.matchMs) : null;
  }
- if (!(matchMin > 0)) matchMin = 0; // treat 0/negative/NaN as unlimited
- const matchMs = matchMin > 0 ? Math.min(MAX_MATCH_MIN, matchMin) * 60000 : null;
 
  return { votingMs, matchMs };
 }
@@ -272,9 +277,10 @@ export function createGameState(seed, players, options = {}) {
  votingDurationMs: timers.votingMs, // per-turn vote timer
  matchDurationMs: timers.matchMs, // total match timer (null = unlimited)
  settings: {
- votingTimeSec: timers.votingMs / 1000,
- matchTimeMin: timers.matchMs ? timers.matchMs / 60000 : 0,
+ votingTimeMin: timers.votingMs / 60000,
+ matchTimeMin: timers.matchMs !== null ? timers.matchMs / 60000 : -1,
  },
+ quorumExecAt: null, // timestamp when quorum reached + 15s delay elapses
  phaseDeadline: timers.votingMs, // in game-time ms
  proposals: [],
  playerVotes: {},
@@ -415,13 +421,45 @@ export function updateGameState(state, inputs, dt) {
  }
  }
 
- // Check deadline
- if (state.timestamp >= data.phaseDeadline) {
+ // Enough votes? Start (or cancel) the 15-second lock-in, and execute
+ // once it elapses - no need to wait for the full vote timer.
+ updateQuorum(state);
+
+ const quorumDue = data.quorumExecAt !== null && data.quorumExecAt !== undefined
+ && state.timestamp >= data.quorumExecAt;
+ if (quorumDue || state.timestamp >= data.phaseDeadline) {
  executeTopMove(state);
  }
  }
 
  return state;
+}
+
+/**
+ * A proposal has "enough votes" when it holds a strict majority of the
+ * moving team's players. First time that happens we stamp
+ * quorumExecAt = now + 15s; the move then executes automatically when the
+ * lock-in elapses even if the vote timer is still running. If votes shift
+ * away and NO proposal holds a majority anymore, the lock-in is cancelled.
+ */
+function updateQuorum(state) {
+ const data = state.data;
+
+ let quorumProposal = null;
+ if (data.proposals.length > 0) {
+ const teamSize = (data.turn === "white" ? data.whitePlayerIds : data.blackPlayerIds).length;
+ const needed = Math.floor(teamSize / 2) + 1;
+ const sorted = [...data.proposals].sort((a, b) => b.votes - a.votes);
+ if (sorted[0] && sorted[0].votes >= needed) {
+ quorumProposal = sorted[0];
+ }
+ }
+
+ if (quorumProposal && data.quorumExecAt === null) {
+ data.quorumExecAt = state.timestamp + QUORUM_EXEC_DELAY_MS;
+ } else if (!quorumProposal) {
+ data.quorumExecAt = null;
+ }
 }
 
 function recountVotes(data) {
@@ -492,6 +530,7 @@ function switchTurn(state) {
  data.phaseDeadline = state.timestamp + (data.votingDurationMs || 20000);
  data.proposals = [];
  data.playerVotes = {};
+ data.quorumExecAt = null;
  data.turnNumber++;
 }
 
@@ -639,11 +678,22 @@ export function render(ctx, state, localPlayerId, w, h) {
  const turnText = (data.turn === "white" ? "White" : "Black") + " to move" + (isMyTurn ? " (your team!)" : "");
  ctx.fillText(turnText, ox + boardSize / 2, oy + boardSize + 35);
 
+ ctx.textAlign = "center";
+ ctx.font = "bold 14px monospace";
+
+ // Lock-in countdown: a proposal has enough votes and executes in <=15s.
+ if (data.quorumExecAt !== null && data.quorumExecAt !== undefined) {
+ const execLeft = Math.max(0, Math.ceil((data.quorumExecAt - state.timestamp) / 1000));
+ ctx.fillStyle = "#fbbf24"; // gold
+ ctx.fillText("Enough votes! Executing in " + execLeft + "s", ox + boardSize / 2, oy + boardSize + 55);
+ return;
+ }
+
  // Vote timer (per turn)
  const remainingMs = Math.max(0, data.phaseDeadline - state.timestamp);
  const remainingSec = Math.ceil(remainingMs / 1000);
 
- // Total match clock (if configured)
+ // Total match clock (if configured; unlimited matches show no clock)
  let matchText = "";
  if (data.matchDurationMs !== null && data.matchDurationMs !== undefined) {
  const matchLeftMs = Math.max(0, data.matchDurationMs - state.timestamp);
@@ -652,8 +702,6 @@ export function render(ctx, state, localPlayerId, w, h) {
  matchText = "  Match: " + mm + ":" + String(ss).padStart(2, "0");
  }
 
- ctx.textAlign = "center";
- ctx.font = "bold 14px monospace";
  // Red when the active timer is running low: <5s on the vote clock,
  // or under a minute left in the whole match.
  const matchLow = data.matchDurationMs != null && (data.matchDurationMs - state.timestamp) <= 60000;

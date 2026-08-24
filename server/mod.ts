@@ -376,7 +376,7 @@ function lobbySummary(lobby: any) {
  signupCount: lobby.signups?.length || 0,
  maxPlayers: lobby.maxPlayers,
  minPlayers: lobby.minPlayers,
- votingTimeSec: lobby.votingTimeSec ?? 20,
+ votingTimeMin: lobby.votingTimeMin ?? 0.25,
  matchTimeMin: lobby.matchTimeMin ?? 10,
  hostName: lobby.hostName,
  hostUserId: lobby.hostUserId || null,
@@ -426,11 +426,15 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  type: (body.type as LobbyType) || "open",
  maxPlayers: Math.min(20, Math.max(2, parseInt(body.maxPlayers, 10) || 10)),
  minPlayers: Math.min(10, Math.max(2, parseInt(body.minPlayers, 10) || 2)),
- votingTimeSec: Math.min(120, Math.max(5, parseInt(body.votingTimeSec, 10) || 20)),
+ votingTimeMin: (() => {
+ const v = Number(body.votingTimeMin);
+ if (!Number.isFinite(v) || v <= 0) return 0.25;
+ return Math.min(2, Math.max(0.1, v)); // vote time capped at 2 minutes
+ })(),
  matchTimeMin: (() => {
- const v = parseInt(body.matchTimeMin, 10);
- if (!Number.isFinite(v) || v <= 0) return 0; // 0 = unlimited
- return Math.min(180, v);
+ const v = Number(body.matchTimeMin);
+ if (!Number.isFinite(v) || v <= 0) return -1; // -1 / 0 = unlimited
+ return Math.round(v);
  })(),
  });
  return json({ lobby: lobbySummary(lobby) });

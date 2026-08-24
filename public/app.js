@@ -26,6 +26,7 @@ import {
  loadLocalReplays,
  renameLocalReplay,
 } from "./ui/local-archive.js";
+import * as cookies from "./ui/cookies.js";
 
 // ─── Polyfills ───────────────────────────────────────────────────────────────
 
@@ -127,7 +128,7 @@ const state = {
  players: [],
  seed: null,
  gameId: null,
- gameSettings: null, // { votingTimeSec, matchTimeMin } chosen at lobby creation
+ gameSettings: null, // { votingTimeMin, matchTimeMin } chosen at lobby creation
  isHost: false,
  matchStartTime: null,
  signalingSocket: null,
@@ -174,7 +175,8 @@ function generateName() {
 }
 
 function initPlayer() {
- const stored = { id: localStorage.getItem("tgn_playerId"), name: localStorage.getItem("tgn_playerName") };
+ // Cookies first (survive localStorage clears), localStorage as fallback.
+ const stored = { id: cookies.restore("tgn_playerId"), name: cookies.restore("tgn_playerName") };
  if (!stored.id) stored.id = generateId();
  state.playerId = stored.id;
 
@@ -184,8 +186,8 @@ function initPlayer() {
  }
 
  state.playerName = stored.name;
- localStorage.setItem("tgn_playerId", state.playerId);
- localStorage.setItem("tgn_playerName", state.playerName);
+ cookies.persist("tgn_playerId", state.playerId);
+ cookies.persist("tgn_playerName", state.playerName);
  window.__tgn_playerName = state.playerName;
  dom.playerInfo.textContent = state.playerName;
  hideUsernameScreen();
@@ -262,7 +264,7 @@ function setUsername() {
  return;
  }
  state.playerName = name;
- localStorage.setItem("tgn_playerName", state.playerName);
+ cookies.persist("tgn_playerName", state.playerName);
  window.__tgn_playerName = state.playerName;
  dom.playerInfo.textContent = state.playerName;
  hideUsernameScreen();
@@ -501,9 +503,7 @@ class P2PClient {
 
  pc.onicecandidate = (e) => {
  if (e.candidate) {
- sendToServer({
- type: "ice-candidate", to: peerId, from: this.localPlayerId, data: e.candidate,
- });
+ sendSignalToPeer(peerId, "ice-candidate", e.candidate);
  }
  };
 
@@ -654,9 +654,7 @@ class P2PClient {
 
  const offer = await pc.createOffer();
  await pc.setLocalDescription(offer);
- sendToServer({
- type: "offer", to: peerId, from: this.localPlayerId, data: offer,
- });
+ sendSignalToPeer(peerId, "offer", offer);
  }
 
  async handleOffer(from, offer) {
@@ -674,9 +672,7 @@ class P2PClient {
  await pc.setRemoteDescription(offer);
  const answer = await pc.createAnswer();
  await pc.setLocalDescription(answer);
- sendToServer({
- type: "answer", to: from, from: this.localPlayerId, data: answer,
- });
+ sendSignalToPeer(from, "answer", answer);
  } catch (e) {
  console.error("[P2P] handleOffer failed:", e);
  }
@@ -1175,24 +1171,32 @@ function renderQuickLobbies(lobbyList) {
  '</div>' +
  '<button class="btn btn-primary btn-sm">Join</button>';
  const btn = div.querySelector("button");
- btn.addEventListener("click", () => {
- if (!state.signalingSocket || state.signalingSocket.readyState !== WebSocket.OPEN && state.signalingSocket.readyState !== 1) {
- showToast("Connecting...", "info");
+ btn.addEventListener("click", async () => {
+ const user = fb.getCurrentUser();
+ if (!user) {
+ showToast("Log in to join a lobby", "error");
  return;
  }
- sendToServer({
- type: "join-specific",
- lobbyId: lobby.id,
- playerName: state.playerName,
- });
- showToast("Joining lobby...", "info");
+ try {
+ const joined = await fb.joinLobby(lobby.id);
+ showToast("Joined lobby!", "success");
+ handleLobbyStateUpdate(joined, null);
+ attachLobbyWatcher(lobby.id);
+ window.location.hash = "#/game";
+ } catch (e) {
+ showToast(e.message, "error");
+ }
  });
  list.appendChild(div);
  }
 }
 
 function leaveCurrentLobby() {
- sendToServer({ type: "leave-lobby" });
+ const lobbyId = state.currentLobbyId;
+ if (lobbyId) {
+ fb.leaveLobby(lobbyId).catch((e) => console.warn("[Firebase] leave failed:", e));
+ }
+ if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch {} lobbyWatchUnsub = null; }
  state.currentLobbyId = null;
  lobbies.setCurrentLobbyId(null);
  dom.lobbyWait.classList.add("hidden");
@@ -1347,6 +1351,58 @@ function handleSignalingMessage(msg) {
  }
 }
 
+// ─── Firebase lobby watcher (game-start propagation) ────────────────────────
+// The host writes status=starting + seed via fb.startMatch(); every member
+// watches the lobby record and starts the game locally when it flips.
+
+let lobbyWatchUnsub = null;
+
+function attachLobbyWatcher(lobbyId) {
+ if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch {} lobbyWatchUnsub = null; }
+ if (!lobbyId) return;
+ lobbyWatchUnsub = fb.onLobbyChange(lobbyId, (lobby) => {
+ if (!lobby) return;
+ // Keep the waiting room UI fresh while we wait.
+ if (!state.gameStarted && !state.matchEnded) {
+ handleLobbyStateUpdate(lobby);
+ }
+ // Host pressed start (or auto-start): everyone launches locally.
+ if ((lobby.status === "starting" || lobby.status === "playing") &&
+ !state.gameStarted && !state.matchEnded) {
+ startFirebaseMatch(lobby);
+ }
+ });
+}
+
+function startFirebaseMatch(lobby) {
+ const names = lobby.playerNames || {};
+ const players = (lobby.players || []).map((uid) => ({
+ id: uid,
+ name: names[uid] || "Player",
+ connected: true,
+ }));
+ handleGameStart({
+ seed: lobby.seed || 1,
+ players,
+ hostId: lobby.hostId,
+ gameId: lobby.game || "team-chess",
+ gameModule: lobby.game || "team-chess",
+ settings: {
+ votingTimeMin: lobby.votingTimeMin ?? 0.25,
+ matchTimeMin: lobby.matchTimeMin ?? 10,
+ },
+ iceConfig: state.iceConfig,
+ });
+}
+
+// Lobbies page join flow notifies us so we attach to the lobby.
+window.addEventListener("tgn:joined-lobby", (e) => {
+ const lobby = e.detail;
+ if (!lobby || !lobby.id) return;
+ handleLobbyStateUpdate(lobby, null);
+ attachLobbyWatcher(lobby.id);
+});
+
 function handleLobbyStateUpdate(lobby, iceConfig) {
  if (!lobby) return;
  state.currentLobbyId = lobby.id;
@@ -1450,6 +1506,12 @@ function escapeHTML(str) {
 
 // Handle game-start message from server
 function handleGameStart(msg) {
+ // Firebase lobbies identify players by uid. Adopt the uid as the local
+ // player id so team lookup and input routing match the players array.
+ const myUid = fb.getCurrentUser()?.uid;
+ if (myUid && (msg.players || []).some((p) => p.id === myUid)) {
+ state.playerId = myUid;
+ }
  state.seed = msg.seed;
  state.players = msg.players;
  state.hostId = msg.hostId;
@@ -1710,6 +1772,34 @@ function updateGameSidebar(gameState) {
  }
 }
 
+/**
+ * Route a WebRTC signaling message to a peer through Firebase RTDB
+ * (the old WebSocket relay was replaced by Firebase; the loopback mock
+ * socket could never deliver these to other players).
+ */
+function sendSignalToPeer(toUid, type, data) {
+ const lobbyId = state.currentLobbyId;
+ if (!lobbyId || !toUid) return;
+ fb.sendSignal(lobbyId, toUid, { type, data }).catch((e) => {
+ console.warn("[P2P] signal send failed (" + type + "):", e);
+ });
+}
+
+// Listen for incoming WebRTC signals from other lobby members.
+let signalsUnsub = null;
+function listenForSignals() {
+ if (signalsUnsub) { try { signalsUnsub(); } catch {} signalsUnsub = null; }
+ const lobbyId = state.currentLobbyId;
+ if (!lobbyId) return;
+ signalsUnsub = fb.onSignal(lobbyId, (signal) => {
+ if (!signal || !state.p2pClient) return;
+ const { type, data } = signal.data || {};
+ if (type === "offer") state.p2pClient.handleOffer(signal.from, data);
+ else if (type === "answer") state.p2pClient.handleAnswer(signal.from, data);
+ else if (type === "ice-candidate") state.p2pClient.handleIceCandidate(signal.from, data);
+ });
+}
+
 // Set up P2P connections
 function setupP2P() {
  const p2p = new P2PClient(state.playerId, state.hostId, state.players, state.iceConfig);
@@ -1757,6 +1847,7 @@ function setupP2P() {
  };
 
  state.p2pClient = p2p;
+ listenForSignals();
 
  if (p2p.isHost) {
  // Host waits for incoming offers from clients
@@ -2128,6 +2219,20 @@ async function main() {
  gameMgr.setupMouse();
  initRouter();
 
+ // Cookie notice: show once, remember the visitor's choice in a cookie.
+ const cookieBanner = document.getElementById("cookie-banner");
+ if (cookieBanner && !cookies.hasCookieConsent()) {
+ cookieBanner.classList.remove("hidden");
+ const acceptBtn = document.getElementById("cookie-accept-btn");
+ const declineBtn = document.getElementById("cookie-decline-btn");
+ const closeBanner = (accepted) => {
+ cookies.rememberCookieConsent(accepted);
+ cookieBanner.classList.add("hidden");
+ };
+ acceptBtn?.addEventListener("click", () => closeBanner(true));
+ declineBtn?.addEventListener("click", () => closeBanner(false));
+ }
+
  // Wire up chat
  const chatSendBtn = document.getElementById("chat-send-btn");
  const chatInput = document.getElementById("chat-input");
@@ -2167,6 +2272,8 @@ async function main() {
         type: "open",
         maxPlayers: 10,
         minPlayers: 2,
+        votingTimeMin: 0.25,
+        matchTimeMin: 10,
         hostName: state.playerName,
       });
       showToast("Lobby created!", "success");
@@ -2196,9 +2303,17 @@ async function main() {
  dom.findMatchScreen.classList.remove("hidden");
  });
  dom.leaveLobbyBtn.addEventListener("click", leaveCurrentLobby);
- dom.startMatchBtn.addEventListener("click", () => {
- sendToServer({ type: "start-match" });
+ dom.startMatchBtn.addEventListener("click", async () => {
+ if (!state.currentLobbyId) {
+ showToast("Not in a lobby", "error");
+ return;
+ }
+ try {
+ await fb.startMatch(state.currentLobbyId);
  showToast("Starting match...", "info");
+ } catch (e) {
+ showToast(e.message, "error");
+ }
  });
 
  // Copy invite link button

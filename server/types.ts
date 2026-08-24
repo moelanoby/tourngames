@@ -37,13 +37,15 @@ export interface Lobby {
  type: LobbyType;
  maxPlayers: number;
  minPlayers: number;
- /** Vote time per turn in seconds (5-120). */
- votingTimeSec?: number;
- /** Total match time in minutes (1-180, 0 = unlimited). */
+ /** Vote time per turn in minutes (0.1-2; fractions allowed). */
+ votingTimeMin?: number;
+ /** Total match time in minutes (-1 = unlimited). */
  matchTimeMin?: number;
  inviteCode: string | null;
  signups: SignupEntry[];
  startedAt: number | null;
+ /** Last write time, used for stale-lobby sweeps. */
+ updatedAt?: number;
 }
 
 export type UserRole = "user" | "admin";

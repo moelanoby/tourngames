@@ -237,14 +237,14 @@
  </div>
  <div class="form-row mb-4">
  <div class="form-group">
- <label class="form-label">Vote time per turn (seconds)</label>
- <input type="number" id="create-voting-time" min="5" max="120" value="20" class="input">
- <p class="text-xs text-muted mt-1">How long each team has to vote on a move.</p>
+ <label class="form-label">Vote time per turn (minutes)</label>
+ <input type="number" id="create-voting-time" min="0.1" max="2" step="0.05" value="0.25" class="input">
+ <p class="text-xs text-muted mt-1">Time to vote each turn. Max 2 minutes. Enough votes = move executes after 15s.</p>
  </div>
  <div class="form-group">
  <label class="form-label">Match time (minutes)</label>
- <input type="number" id="create-match-time" min="0" max="180" value="10" class="input">
- <p class="text-xs text-muted mt-1">Total game time. 0 = unlimited. On timeout, most material wins.</p>
+ <input type="number" id="create-match-time" min="-1" step="1" value="10" class="input">
+ <p class="text-xs text-muted mt-1">Total game length in minutes. Use -1 for unlimited. On timeout, most material wins.</p>
  </div>
  </div>
  <div class="flex gap-2">
@@ -294,8 +294,24 @@
  </div>
 
  <div style="border-top: 1px solid var(--border); padding-top: 16px;">
+ <!-- Host-only timer customization (while waiting) -->
+ <div id="detail-timer-section" class="hidden mb-4">
+ <h4 class="mb-3">Timer settings</h4>
+ <div class="form-row mb-3">
+ <div class="form-group">
+ <label class="form-label">Vote time / turn (min)</label>
+ <input type="number" id="detail-voting-time" min="0.1" max="2" step="0.05" class="input">
+ </div>
+ <div class="form-group">
+ <label class="form-label">Match time (min)</label>
+ <input type="number" id="detail-match-time" min="-1" step="1" class="input">
+ </div>
+ </div>
+ <p class="text-xs text-muted mb-2">Match time -1 = unlimited. Vote time max 2 minutes.</p>
+ <button id="detail-save-timers-btn" class="btn btn-secondary btn-sm">Save timers</button>
+ </div>
  <button id="detail-start-match-btn" class="btn btn-primary">Start match</button>
- <p class="form-hint mt-2">Only the host can start the match.</p>
+ <p class="form-hint mt-2">Only the host can start the match and change timers.</p>
  </div>
  </div>
  </div>
@@ -488,6 +504,17 @@
  <div class="loading-bar" id="loading-bar"></div>
  </div>
  <p class="loading-text" id="loading-text">loading...</p>
+ </div>
+ </div>
+
+ <!-- Cookie notice (first visit only) -->
+ <div id="cookie-banner" class="hidden" style="position:fixed;bottom:16px;left:16px;right:16px;max-width:520px;margin:0 auto;z-index:90;">
+ <div class="card p-4">
+ <p class="text-sm text-muted mb-3">This site uses cookies to remember your player name and game settings between visits.</p>
+ <div class="flex gap-2">
+ <button id="cookie-accept-btn" class="btn btn-primary btn-sm">Accept cookies</button>
+ <button id="cookie-decline-btn" class="btn btn-ghost btn-sm">Essential only</button>
+ </div>
  </div>
  </div>
 

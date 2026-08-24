@@ -8,6 +8,9 @@
 import {
   createLobby as fbCreateLobby,
   joinLobby as fbJoinLobby,
+  startMatch as fbStartMatch,
+  updateLobby as fbUpdateLobby,
+  cleanupStaleLobbies,
   leaveLobby as fbLeaveLobby,
   onLobbyListChange,
   onLobbyChange,
@@ -52,6 +55,12 @@ function cacheDom() {
   dom.createMax = document.getElementById("create-max");
   dom.createVotingTime = document.getElementById("create-voting-time");
   dom.createMatchTime = document.getElementById("create-match-time");
+  dom.detailTimerSection = document.getElementById("detail-timer-section");
+  dom.detailVotingTime = document.getElementById("detail-voting-time");
+  dom.detailMatchTime = document.getElementById("detail-match-time");
+  dom.detailSaveTimersBtn = document.getElementById("detail-save-timers-btn");
+  dom.createVotingTime = document.getElementById("create-voting-time");
+  dom.createMatchTime = document.getElementById("create-match-time");
 
   dom.detail = document.getElementById("lobby-detail");
   dom.detailName = document.getElementById("detail-name");
@@ -88,6 +97,16 @@ function bindEvents() {
   }
   if (dom.detailJoinBtn) {
     dom.detailJoinBtn.addEventListener("click", handleJoin);
+  }
+  if (dom.detailSaveTimersBtn) {
+    dom.detailSaveTimersBtn.addEventListener("click", handleSaveTimers);
+  }
+  // Sweep dead lobbies now and every 5 minutes so they don't pile up.
+  const sweep = () => { cleanupStaleLobbies().catch(() => {}); };
+  sweep();
+  setInterval(sweep, 5 * 60 * 1000);
+  if (dom.detailStartMatchBtn) {
+    dom.detailStartMatchBtn.addEventListener("click", handleStartMatch);
   }
   if (dom.browseLink) {
     dom.browseLink.addEventListener("click", () => {
@@ -157,7 +176,7 @@ export function renderLobbyList(list) {
           </div>
           <div class="text-sm text-muted font-mono">
             ${esc(lobby.hostName || "Host")} · ${esc(lobby.game)} · ${playerCount}/${lobby.maxPlayers || 10} players
-            · vote ${lobby.votingTimeSec ?? 20}s${lobby.matchTimeMin ? ` · match ${lobby.matchTimeMin}min` : " · no time limit"}
+            · ${formatTimers(lobby)}
           </div>
         </div>
         <div class="text-right">
@@ -189,10 +208,13 @@ async function handleCreate() {
   const minPlayers = Math.max(2, parseInt(dom.createMin?.value, 10) || 2);
   const maxPlayers = Math.max(minPlayers, parseInt(dom.createMax?.value, 10) || 10);
 
-  // Timer settings: vote time per turn + total match time (0 = unlimited).
-  const votingTimeSec = Math.min(120, Math.max(5, parseInt(dom.createVotingTime?.value, 10) || 20));
-  const matchTimeRaw = parseInt(dom.createMatchTime?.value, 10);
-  const matchTimeMin = Number.isFinite(matchTimeRaw) && matchTimeRaw > 0 ? Math.min(180, matchTimeRaw) : 0;
+  // Timer settings, all in MINUTES:
+  //  - vote time: capped at 2 min (fractions allowed, e.g. 0.25 = 15s)
+  //  - match time: -1 = unlimited, otherwise any positive duration
+  const votingRaw = parseFloat(dom.createVotingTime?.value);
+  const votingTimeMin = Number.isFinite(votingRaw) && votingRaw > 0 ? Math.min(2, Math.max(0.1, votingRaw)) : 0.25;
+  const matchRaw = parseFloat(dom.createMatchTime?.value);
+  const matchTimeMin = Number.isFinite(matchRaw) && matchRaw > 0 ? Math.round(matchRaw) : -1;
 
   try {
     const lobby = await fbCreateLobby({
@@ -201,7 +223,7 @@ async function handleCreate() {
       type,
       minPlayers,
       maxPlayers,
-      votingTimeSec,
+      votingTimeMin,
       matchTimeMin,
       hostName: user.displayName || user.email?.split("@")[0] || "Host",
     });
@@ -248,8 +270,7 @@ function renderDetail(lobby) {
   if (dom.detailMeta) {
     dom.detailMeta.textContent =
       `${esc(lobby.game)} · ${lobby.type} · ${lobby.players?.length || 0}/${lobby.maxPlayers || 10} players` +
-      ` · vote ${lobby.votingTimeSec ?? 20}s/turn` +
-      ` · ${lobby.matchTimeMin ? `match ${lobby.matchTimeMin}min` : "no match time limit"}`;
+      ` · ${formatTimers(lobby)}`;
   }
 
   // Players
@@ -301,11 +322,58 @@ function renderDetail(lobby) {
   if (dom.detailStartMatchBtn) {
     dom.detailStartMatchBtn.classList.toggle("hidden", !isHost);
     if (isHost) {
-      dom.detailStartMatchBtn.disabled = playerCount < (lobby.minPlayers || 2);
-      dom.detailStartMatchBtn.textContent = playerCount < (lobby.minPlayers || 2)
-        ? `Need ${lobby.minPlayers || 2}+ players`
-        : "Start Match";
+      const starting = lobby.status === "starting" || lobby.status === "playing";
+      dom.detailStartMatchBtn.disabled = playerCount < (lobby.minPlayers || 2) || starting;
+      dom.detailStartMatchBtn.textContent = starting
+        ? "Starting..."
+        : playerCount < (lobby.minPlayers || 2)
+          ? `Need ${lobby.minPlayers || 2}+ players`
+          : "Start Match";
     }
+  }
+
+  // Timer customization (host only, while the lobby is still waiting)
+  if (dom.detailTimerSection) {
+    dom.detailTimerSection.classList.toggle("hidden", !isHost || lobby.status !== "waiting");
+    if (isHost && document.activeElement !== dom.detailVotingTime) {
+      if (dom.detailVotingTime) {
+        dom.detailVotingTime.value = lobby.votingTimeMin ?? 0.25;
+      }
+      if (dom.detailMatchTime && document.activeElement !== dom.detailMatchTime) {
+        dom.detailMatchTime.value = lobby.matchTimeMin ?? 10;
+      }
+    }
+  }
+}
+
+// ─── Host Timer Customization + Match Start (Firebase) ──────────────────────
+
+async function handleSaveTimers() {
+  if (!currentDetailLobbyId) return;
+  const voteRaw = parseFloat(dom.detailVotingTime?.value);
+  const votingTimeMin = Number.isFinite(voteRaw) && voteRaw > 0 ? Math.min(2, Math.max(0.1, voteRaw)) : 0.25;
+  const matchRaw = parseFloat(dom.detailMatchTime?.value);
+  const matchTimeMin = Number.isFinite(matchRaw) && matchRaw > 0 ? Math.round(matchRaw) : -1;
+
+  try {
+    await fbUpdateLobby(currentDetailLobbyId, { votingTimeMin, matchTimeMin });
+    showToast(`Timers saved: vote ${votingTimeMin}min · match ${matchTimeMin < 0 ? "unlimited" : matchTimeMin + "min"}`, "success");
+  } catch (e) {
+    showToast("Failed to save timers: " + e.message, "error");
+  }
+}
+
+/**
+ * Host clicks Start: writes status=starting + seed to Firebase.
+ * Every member's lobby watcher picks up the change and starts the game.
+ */
+async function handleStartMatch() {
+  if (!currentDetailLobbyId) return;
+  try {
+    await fbStartMatch(currentDetailLobbyId);
+    showToast("Starting match...", "success");
+  } catch (e) {
+    showToast(e.message, "error");
   }
 }
 
@@ -320,8 +388,10 @@ async function handleJoin() {
   }
 
   try {
-    await fbJoinLobby(currentDetailLobbyId);
+    const lobby = await fbJoinLobby(currentDetailLobbyId);
     showToast("Joined lobby!", "success");
+    // Let app.js attach to this lobby (waiting room UI + game-start watcher).
+    window.dispatchEvent(new CustomEvent("tgn:joined-lobby", { detail: lobby }));
   } catch (e) {
     showToast(e.message, "error");
   }
@@ -356,6 +426,15 @@ export function setCurrentLobbyId(id) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Human-readable timer summary, e.g. "vote 15s/turn · match 10min" or "match unlimited". */
+export function formatTimers(lobby) {
+  const voteMin = lobby?.votingTimeMin ?? 0.25;
+  const voteLabel = voteMin * 60 < 90 ? Math.round(voteMin * 60) + "s" : voteMin + "min";
+  const matchMin = lobby?.matchTimeMin ?? 10;
+  const matchLabel = matchMin < 0 ? "unlimited" : matchMin + "min";
+  return `vote ${voteLabel}/turn · match ${matchLabel}`;
+}
 
 function esc(str) {
   return String(str || "")

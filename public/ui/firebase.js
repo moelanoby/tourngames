@@ -176,12 +176,19 @@ export async function createLobby(lobbyData) {
 
   const lobby = {
     id: lobbyId,
-    ...lobbyData,
+    name: lobbyData.name || "Untitled Lobby",
+    game: lobbyData.game || "team-chess",
+    type: lobbyData.type || "open",
+    minPlayers: lobbyData.minPlayers ?? 2,
+    maxPlayers: lobbyData.maxPlayers ?? 10,
+    // Timer settings (all measured in minutes; matchTimeMin -1 = unlimited)
+    votingTimeMin: lobbyData.votingTimeMin ?? 0.25,
+    matchTimeMin: lobbyData.matchTimeMin ?? 10,
     hostId: currentUser?.uid,
     hostName: currentUser?.displayName || "Anonymous",
     players: [currentUser?.uid],
     playerNames: { [currentUser?.uid]: currentUser?.displayName || "Anonymous" },
-    status: "waiting", // waiting, playing, finished
+    status: "waiting", // waiting, starting, playing, finished
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp()
   };
@@ -248,6 +255,91 @@ export async function leaveLobby(lobbyId) {
 
   // Clear user's presence
   updatePresence({ lobbyId: null, game: null });
+}
+
+/**
+ * Patch arbitrary fields on a lobby (host operations).
+ */
+export async function updateLobby(lobbyId, patch) {
+  if (!initialized) initFirebase();
+  await update(ref(db, `lobbies/${lobbyId}`), { ...patch, updatedAt: serverTimestamp() });
+}
+
+/**
+ * Host starts the match: locks the lobby, generates a seed and stamps the
+ * start time. Every member's lobby watcher sees status flip to "starting"
+ * and begins the game locally (host-authoritative P2P from there).
+ * Returns the updated lobby data or throws with a readable reason.
+ */
+export async function startMatch(lobbyId) {
+  if (!initialized) initFirebase();
+  const snapshot = await get(ref(db, `lobbies/${lobbyId}`));
+  if (!snapshot.exists()) throw new Error("Lobby not found");
+  const lobby = snapshot.val();
+
+  const uid = currentUser?.uid;
+  if (!uid) throw new Error("Not signed in");
+  if (lobby.hostId !== uid) throw new Error("Only the host can start the match");
+  if (lobby.status === "starting" || lobby.status === "playing") {
+    return lobby; // already starting - idempotent
+  }
+  const playerCount = Array.isArray(lobby.players) ? lobby.players.length : 0;
+  if (playerCount < (lobby.minPlayers || 2)) {
+    throw new Error(`Need at least ${lobby.minPlayers || 2} players`);
+  }
+
+  const seed = Math.floor(Math.random() * 2147483647) + 1;
+  await updateLobby(lobbyId, { status: "starting", seed, startedAt: Date.now() });
+  return { ...lobby, status: "starting", seed };
+}
+
+/**
+ * Remove a lobby outright (used by host and by stale-lobby sweeps).
+ */
+export async function deleteLobby(lobbyId) {
+  if (!initialized) initFirebase();
+  await remove(ref(db, `lobbies/${lobbyId}`));
+  // Best-effort cleanup of per-lobby side data.
+  try { await remove(ref(db, `signaling/${lobbyId}`)); } catch { /* ignore */ }
+  try { await remove(ref(db, `games/${lobbyId}`)); } catch { /* ignore */ }
+  try { await remove(ref(db, `chat/${lobbyId}`)); } catch { /* ignore */ }
+}
+
+/**
+ * Sweep dead lobbies so they don't pile up:
+ *  - non-waiting lobbies older than 2h since start (match long over)
+ *  - any lobby with no activity for over an hour
+ * Safe to call repeatedly; runs for every client but deletions are
+ * idempotent and only touch clearly-dead records.
+ * Returns the number of lobbies removed.
+ */
+export async function cleanupStaleLobbies(maxAgeMs = 60 * 60 * 1000, matchMaxAgeMs = 2 * 60 * 60 * 1000) {
+  if (!initialized) initFirebase();
+  const snapshot = await get(ref(db, "lobbies"));
+  if (!snapshot.exists()) return 0;
+  const now = Date.now();
+  let removed = 0;
+  snapshot.forEach((child) => {
+    const lobby = child.val();
+    if (!lobby || !child.key) return;
+    const updatedAt = typeof lobby.updatedAt === "number" ? lobby.updatedAt : null;
+    const startedAt = typeof lobby.startedAt === "number" ? lobby.startedAt : null;
+    const createdAt = typeof lobby.createdAt === "number" ? lobby.createdAt : updatedAt;
+    const lastActivity = Math.max(updatedAt || 0, startedAt || 0, createdAt || 0);
+
+    let dead = false;
+    if (lobby.status && lobby.status !== "waiting" && startedAt && now - startedAt > matchMaxAgeMs) {
+      dead = true; // match ended hours ago
+    }
+    if (!lastActivity || now - lastActivity > maxAgeMs) {
+      dead = true; // nobody touched it for over an hour
+    }
+    if (dead) {
+      removed++;
+      deleteLobby(child.key).catch(() => {});
+    }
+  });
+  return removed;
 }
 
 export function onLobbyListChange(callback) {

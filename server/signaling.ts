@@ -357,7 +357,7 @@ export async function handleWebSocketMessage(
  gameModule: lobby.gameId,
  // Host-configured timers chosen at lobby creation.
  settings: {
- votingTimeSec: lobby.votingTimeSec ?? 20,
+ votingTimeMin: lobby.votingTimeMin ?? 0.25,
  matchTimeMin: lobby.matchTimeMin ?? 10,
  },
  iceConfig: ICE_CONFIG,

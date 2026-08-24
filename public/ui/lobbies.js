@@ -263,8 +263,11 @@ async function handleCreate() {
     cleanupStaleLobbies().catch(() => {});
     createFormOpen = false;
     dom.createForm.classList.add("hidden");
-    // Auto-join the lobby you created
+    // Auto-join the lobby you created: open the detail view AND attach
+    // the app's lobby watcher, otherwise the host's Start press would
+    // flip status to "starting" with nobody listening for it.
     showDetail(lobby.id);
+    window.dispatchEvent(new CustomEvent("tgn:joined-lobby", { detail: lobby }));
   } catch (e) {
     showToast("Failed to create lobby: " + e.message, "error");
   }

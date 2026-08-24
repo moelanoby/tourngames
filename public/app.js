@@ -1416,6 +1416,11 @@ function startFirebaseMatch(lobby) {
  },
  iceConfig: state.iceConfig,
  });
+ // Matches usually start from the Lobbies page - bring the player to
+ // the game screen so they can see it actually started.
+ if (window.location.hash !== "#/game") {
+ window.location.hash = "#/game";
+ }
 }
 
 // Lobbies page join flow notifies us so we attach to the lobby.

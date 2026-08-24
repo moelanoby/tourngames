@@ -1668,6 +1668,10 @@ function handleGameStart(msg) {
  "<span class='text-gold'>" + (state.isHost ? "● HOST" : "● PLAYER") + "</span>" +
  " · Seed: " + msg.seed;
 
+ // Mark the game as started for EVERYONE (clients too - the Firebase
+  // state mirror and match-over listeners are gated on this flag).
+ state.gameStarted = true;
+
  // Show game-screen immediately on game-start.
  dom.lobbyWait.classList.add("hidden");
  dom.gameScreen.classList.remove("hidden");

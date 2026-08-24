@@ -38,6 +38,7 @@ let unsubLobby = null;
 export function init(opts = {}) {
   cacheDom();
   bindEvents();
+  updateNamePlaceholder();
   // Start listening to lobby list from Firebase
   startLobbyListListener();
 }
@@ -73,6 +74,16 @@ function cacheDom() {
   dom.detailBackBtn = document.getElementById("detail-back-btn");
   dom.detailStartMatchBtn = document.getElementById("detail-start-match-btn");
   dom.browseLink = document.getElementById("browse-lobbies-link");
+}
+
+/**
+ * Show the real username in the create-form placeholder,
+ * e.g. "wawa's lobby :D!". Falls back to {Username} until we know a name.
+ */
+export function updateNamePlaceholder(username) {
+  if (!dom.createName) return;
+  const name = username || getCurrentUser()?.displayName || "";
+  dom.createName.placeholder = (name ? name : "{Username}") + "'s lobby :D!";
 }
 
 function bindEvents() {
@@ -113,6 +124,19 @@ function bindEvents() {
       window.location.hash = "#/lobbies";
     });
   }
+}
+
+/**
+ * Open the full create-lobby form (used by the game screen's
+ * "+ Create new" button so there is ONE unified creation UI).
+ */
+export function openCreateForm() {
+  hideDetail();
+  if (dom.list) dom.list.classList.remove("hidden");
+  createFormOpen = true;
+  dom.createForm?.classList.remove("hidden");
+  updateNamePlaceholder();
+  if (dom.createName) dom.createName.focus();
 }
 
 // ─── Lobby List Listener (Firebase Realtime) ─────────────────────────────────

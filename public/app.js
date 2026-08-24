@@ -189,6 +189,7 @@ function initPlayer() {
  cookies.persist("tgn_playerId", state.playerId);
  cookies.persist("tgn_playerName", state.playerName);
  window.__tgn_playerName = state.playerName;
+ syncLobbyNamePlaceholder();
  dom.playerInfo.textContent = state.playerName;
  hideUsernameScreen();
 }
@@ -267,12 +268,18 @@ function setUsername() {
  cookies.persist("tgn_playerName", state.playerName);
  window.__tgn_playerName = state.playerName;
  dom.playerInfo.textContent = state.playerName;
+ syncLobbyNamePlaceholder();
  hideUsernameScreen();
 }
 
 function changeUsername() {
  showUsernameScreen();
  dom.usernameInput.value = state.playerName;
+}
+
+/** Reflect the current username in the create-lobby placeholder. */
+function syncLobbyNamePlaceholder() {
+ lobbies.updateNamePlaceholder(state.playerName);
 }
 
 // ─── Toast ───────────────────────────────────────────────────────────────────
@@ -1222,6 +1229,7 @@ function handleSignalingMessage(msg) {
  state.playerName = msg.username;
  localStorage.setItem("tgn_playerName", state.playerName);
  window.__tgn_playerName = state.playerName;
+ syncLobbyNamePlaceholder();
  }
  }
  dom.playerInfo.textContent = "Connected: " + state.playerName;
@@ -2146,6 +2154,7 @@ async function main() {
  state.playerName = user.username;
  localStorage.setItem("tgn_playerName", state.playerName);
  window.__tgn_playerName = state.playerName;
+ syncLobbyNamePlaceholder();
  if (dom.playerInfo) dom.playerInfo.textContent = state.playerName;
  hideUsernameScreen();
  }
@@ -2255,38 +2264,14 @@ async function main() {
  dom.findMatchBtn.addEventListener("click", handleFindMatchClick);
  dom.playSoloBtn.addEventListener("click", handlePlaySoloClick);
 
- // "Create new" lobby button (in the quick-lobbies panel)
+ // "Create new" lobby button (in the quick-lobbies panel).
+ // One unified creation UI: routes to the rich form on the Lobbies page.
  const quickCreateBtn = document.getElementById("quick-create-btn");
  if (quickCreateBtn) {
-  quickCreateBtn.addEventListener("click", async () => {
-    const user = fb.getCurrentUser();
-    if (!user) {
-      showToast("Log in to create a lobby", "error");
-      return;
-    }
-    const lobbyName = state.playerName + "'s lobby :D!";
-    try {
-      const lobby = await fb.createLobby({
-        name: lobbyName,
-        game: state.gameConfig?.gameId || "team-chess",
-        type: "open",
-        maxPlayers: 10,
-        minPlayers: 2,
-        votingTimeMin: 0.25,
-        matchTimeMin: 10,
-        hostName: state.playerName,
-      });
-      showToast("Lobby created!", "success");
-      window.location.hash = "#/lobbies";
-      setTimeout(() => {
-        if (typeof lobbies.showDetail === "function") {
-          lobbies.showDetail(lobby.id);
-        }
-      }, 500);
-    } catch (e) {
-      showToast("Failed to create lobby: " + e.message, "error");
-    }
-  });
+ quickCreateBtn.addEventListener("click", () => {
+ window.location.hash = "#/lobbies";
+ lobbies.openCreateForm();
+ });
  }
  dom.setUsernameBtn.addEventListener("click", setUsername);
  dom.usernameInput.addEventListener("keydown", (e) => {

@@ -571,7 +571,7 @@ export function onGameState(lobbyId, callback) {
 
 // ─── Lobby Chat/Messages ─────────────────────────────────────────────────────
 
-export async function sendLobbyMessage(lobbyId, message) {
+export async function sendLobbyMessage(lobbyId, message, meta = {}) {
   if (!initialized) initFirebase();
   const user = getCurrentUser();
   if (!user) throw new Error("Not authenticated");
@@ -582,6 +582,8 @@ export async function sendLobbyMessage(lobbyId, message) {
     from: user.uid,
     fromName: user.displayName || user.email?.split("@")[0] || "Anonymous",
     message,
+    channel: meta.channel || null,
+    senderTeam: meta.senderTeam || null,
     timestamp: serverTimestamp()
   });
 }

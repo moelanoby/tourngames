@@ -533,7 +533,7 @@ class P2PClient {
  const st = pc.iceConnectionState;
  console.log(`[P2P] ${peerId.slice(0, 8)} ICE: ${st}`);
  if (st === "failed") {
- console.warn(`[P2P] ICE failed for ${peerId.slice(0, 8)} will try mesh routing`);
+ console.info(`[P2P] direct route to ${peerId.slice(0, 8)} unavailable - TURN/relay carries traffic`);
  // Mark this peer as needing relay
  this._updateRoutingTable();
  }
@@ -1274,6 +1274,7 @@ function renderQuickLobbies(lobbyList) {
 /** Clear local waiting-room state (no Firebase write). */
 function detachFromLobby() {
  if (lobbyWatchUnsub) { try { lobbyWatchUnsub(); } catch {} lobbyWatchUnsub = null; }
+ if (chatUnsub) { try { chatUnsub(); } catch {} chatUnsub = null; }
  state.currentLobbyId = null;
  lobbies.setCurrentLobbyId(null);
  state.gameSettings = null;
@@ -1674,6 +1675,7 @@ function handleGameStart(msg) {
 
  // Set up P2P mesh all game traffic flows over WebRTC, not the server.
  setupP2P();
+ subscribeToRelayChat();
 
  // Start the host's local simulation immediately
  if (state.isHost) {
@@ -1758,6 +1760,7 @@ function sendChat() {
 
  const team = state.gameState?.data?.playerTeams?.[state.playerId] || null;
 
+ // Fast path: P2P data channels when they happen to be connected.
  if (state.p2pClient) {
  state.p2pClient.broadcast({
  type: "chat",
@@ -1769,7 +1772,36 @@ function sendChat() {
  timestamp: Date.now(),
  });
  }
+ // Reliable path: Firebase relay - keeps chat working in relay mode
+ // when ICE negotiation fails.
+ if (state.currentLobbyId) {
+ fb.sendLobbyMessage(state.currentLobbyId, message, {
+ channel: currentChatChannel,
+ senderTeam: team,
+ }).catch((e) => console.warn("[Chat] relay failed:", e));
+ } else {
+ // No lobby (solo mode): just show it locally.
  displayChatMessage(state.playerName, message, currentChatChannel, team);
+ }
+}
+
+// Relay-mode chat feed. Deduped by message id because onValue re-fires
+// the whole recent-history window on every change.
+let chatUnsub = null;
+const seenChatIds = new Set();
+
+function subscribeToRelayChat() {
+ if (chatUnsub || !state.currentLobbyId) return;
+ seenChatIds.clear();
+ chatUnsub = fb.onLobbyMessages(state.currentLobbyId, (messages) => {
+ for (const msg of messages || []) {
+ if (!msg || seenChatIds.has(msg.id)) continue;
+ seenChatIds.add(msg.id);
+ // Skip our own messages - already displayed optimistically on send.
+ if (msg.from === (fb.getCurrentUser() || {}).uid) continue;
+ displayChatMessage(msg.fromName, msg.message, msg.channel, msg.senderTeam);
+ }
+ });
 }
 
 // ─── Capture Sound ───────────────────────────────────────────────────────────
@@ -1998,7 +2030,7 @@ function setupP2P() {
  // The host connection is the most important (for game state).
  p2p.connectToPeer(state.hostId).catch(e => {
  console.error("[P2P] connection error to host:", e);
- showToast("P2P connection failed check your network", "error");
+ console.info("[P2P] could not reach peer directly - continuing in Firebase relay mode");
  });
  // Also connect to other non-host peers for mesh routing redundancy
  for (const player of state.players) {

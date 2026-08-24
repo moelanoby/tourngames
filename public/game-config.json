@@ -1,7 +1,7 @@
 {
- "gameId": "chess-royale",
- "gameModulePath": "games/chess-royale/mod.js",
- "gameName": "Chess Royale",
+ "gameId": "team-chess",
+ "gameModulePath": "games/team-chess/mod.js",
+ "gameName": "Team Chess",
  "maxPlayers": 20,
  "canvasWidth": 600,
  "canvasHeight": 650

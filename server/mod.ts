@@ -376,6 +376,8 @@ function lobbySummary(lobby: any) {
  signupCount: lobby.signups?.length || 0,
  maxPlayers: lobby.maxPlayers,
  minPlayers: lobby.minPlayers,
+ votingTimeSec: lobby.votingTimeSec ?? 20,
+ matchTimeMin: lobby.matchTimeMin ?? 10,
  hostName: lobby.hostName,
  hostUserId: lobby.hostUserId || null,
  createdAt: lobby.createdAt,
@@ -418,12 +420,18 @@ async function handleLobbiesApi(req: Request, action: string): Promise<Response>
  }
  const lobby = await createLobby({
  name: lobbyName,
- gameId: sanitizeString(body.gameId, 50) || "chess-royale",
+ gameId: sanitizeString(body.gameId, 50) || "team-chess",
  hostName: sanitizeString(body.hostName, 16) || auth.user?.username || "Host",
  hostUserId: auth.user?.id || null,
  type: (body.type as LobbyType) || "open",
  maxPlayers: Math.min(20, Math.max(2, parseInt(body.maxPlayers, 10) || 10)),
  minPlayers: Math.min(10, Math.max(2, parseInt(body.minPlayers, 10) || 2)),
+ votingTimeSec: Math.min(120, Math.max(5, parseInt(body.votingTimeSec, 10) || 20)),
+ matchTimeMin: (() => {
+ const v = parseInt(body.matchTimeMin, 10);
+ if (!Number.isFinite(v) || v <= 0) return 0; // 0 = unlimited
+ return Math.min(180, v);
+ })(),
  });
  return json({ lobby: lobbySummary(lobby) });
  }
@@ -522,7 +530,7 @@ async function handleReplaysApi(req: Request, action: string): Promise<Response>
  * Reads games.config.json to determine the current game, then reads the
  * game module file to extract the description from the first comment block.
  *
- * The game name is derived from the directory name (e.g. "chess-royale").
+ * The game name is derived from the directory name (e.g. "team-chess").
  * The description is the first block comment (/** ... *​/) in the module file.
  */
 async function handleGameConfigApi(): Promise<Response> {
@@ -556,7 +564,7 @@ async function handleGameConfigApi(): Promise<Response> {
  // Module not found fall through to error
  }
 
- // Derive game name from directory: "chess-royale" → "Chess Royale"
+ // Derive game name from directory: "team-chess" → "Team Chess"
  const gameName = currentGame
  .split("-")
  .map((word: string) => word.charAt(0).toUpperCase() + word.slice(1))

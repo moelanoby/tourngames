@@ -5,8 +5,8 @@
 // ─── Metadata ────────────────────────────────────────────────────────────────
 
 export const metadata = {
- id: "chess-royale",
- name: "Chess Royale",
+ id: "team-chess",
+ name: "Team Chess",
  description: "Multiplayer chess each player is a piece. Vote on moves.",
  maxPlayers: 20,
  minPlayers: 2,
@@ -162,9 +162,49 @@ export function getLegalMoves(board, from, color) {
 
 // ─── Game State ──────────────────────────────────────────────────────────────
 
-const VOTING_DURATION_MS = 20000; // 20 seconds per turn
+// ─── Timers (host-configurable via lobby settings) ──────────────────────────
+//
+// Two independent timers:
+//  1. Vote timer  - seconds per turn for teams to propose/vote on a move.
+//  2. Match timer - total wall-clock time for the whole game. When it runs
+//     out, the team with the more valuable material wins (equal material
+//     is a draw).
+//
+// Settings flow from the create-lobby form -> lobby record -> "game-start"
+// message -> createGameState options:
+//   { votingTimeSec: number (5-120, default 20), matchTimeMin: number (0-180, 0 = unlimited, default 10) }
+const DEFAULT_VOTING_MS = 20000;
+const MIN_VOTING_MS = 5000;
+const MAX_VOTING_MS = 120000;
+const DEFAULT_MATCH_MIN = 10;
+const MAX_MATCH_MIN = 180;
 
-export function createGameState(seed, players) {
+export function normalizeTimers(options) {
+ const o = options || {};
+
+ // Vote time per turn
+ let votingMs = DEFAULT_VOTING_MS;
+ if (typeof o.votingTimeSec === "number" && Number.isFinite(o.votingTimeSec)) {
+ votingMs = o.votingTimeSec * 1000;
+ } else if (typeof o.votingMs === "number" && Number.isFinite(o.votingMs)) {
+ votingMs = o.votingMs;
+ }
+ votingMs = Math.min(MAX_VOTING_MS, Math.max(MIN_VOTING_MS, Math.round(votingMs)));
+
+ // Total match time (null/0 = unlimited)
+ let matchMin = DEFAULT_MATCH_MIN;
+ if (typeof o.matchTimeMin === "number" && Number.isFinite(o.matchTimeMin)) {
+ matchMin = o.matchTimeMin;
+ } else if (typeof o.matchMs === "number" && Number.isFinite(o.matchMs)) {
+ matchMin = o.matchMs / 60000;
+ }
+ if (!(matchMin > 0)) matchMin = 0; // treat 0/negative/NaN as unlimited
+ const matchMs = matchMin > 0 ? Math.min(MAX_MATCH_MIN, matchMin) * 60000 : null;
+
+ return { votingMs, matchMs };
+}
+
+export function createGameState(seed, players, options = {}) {
  let prng = (seed || 1) >>> 0;
  function rand() {
  prng = (prng * 1103515245 + 12345) & 0x7fffffff;
@@ -217,6 +257,8 @@ export function createGameState(seed, players) {
  playerTeams[blackPlayers[i].id] = "black";
  }
 
+ const timers = normalizeTimers(options);
+
  return {
  seed: seed >>> 0,
  tick: 0,
@@ -227,7 +269,13 @@ export function createGameState(seed, players) {
  board,
  turn: "white",
  phase: "voting",
- phaseDeadline: VOTING_DURATION_MS, // in game-time ms
+ votingDurationMs: timers.votingMs, // per-turn vote timer
+ matchDurationMs: timers.matchMs, // total match timer (null = unlimited)
+ settings: {
+ votingTimeSec: timers.votingMs / 1000,
+ matchTimeMin: timers.matchMs ? timers.matchMs / 60000 : 0,
+ },
+ phaseDeadline: timers.votingMs, // in game-time ms
  proposals: [],
  playerVotes: {},
  pieceAssignments,
@@ -326,6 +374,13 @@ export function updateGameState(state, inputs, dt) {
  state.timestamp += dt;
 
  if (!state.running) return state;
+
+ // Total match timer: when time is up, decide the game by material count.
+ if (data.matchDurationMs !== null && data.matchDurationMs !== undefined
+ && state.timestamp >= data.matchDurationMs) {
+ endByTimeout(state);
+ return state;
+ }
 
  if (data.phase === "voting") {
  // Process proposals and votes
@@ -434,10 +489,45 @@ function switchTurn(state) {
  const data = state.data;
  data.turn = data.turn === "white" ? "black" : "white";
  data.phase = "voting";
- data.phaseDeadline = state.timestamp + VOTING_DURATION_MS;
+ data.phaseDeadline = state.timestamp + (data.votingDurationMs || 20000);
  data.proposals = [];
  data.playerVotes = {};
  data.turnNumber++;
+}
+
+const PIECE_VALUES = { pawn: 1, knight: 3, bishop: 3, rook: 5, queen: 9, king: 0 };
+
+function materialScore(data, color) {
+ let score = 0;
+ for (let r = 0; r < 8; r++) {
+ for (let c = 0; c < 8; c++) {
+ const piece = data.board[r][c];
+ if (piece && piece.color === color) score += PIECE_VALUES[piece.type] || 0;
+ }
+ }
+ return score;
+}
+
+/**
+ * Total match time expired. The team with more material value wins;
+ * equal material is a draw (winner stays null).
+ */
+function endByTimeout(state) {
+ const data = state.data;
+ state.running = false;
+ data.timeUp = true;
+
+ const whiteScore = materialScore(data, "white");
+ const blackScore = materialScore(data, "black");
+ if (whiteScore === blackScore) {
+ data.winnerTeam = null; // draw
+ return;
+ }
+
+ data.winnerTeam = whiteScore > blackScore ? "white" : "black";
+ const winnerIds = data.winnerTeam === "white" ? data.whitePlayerIds : data.blackPlayerIds;
+ // Report a representative winning player so existing result UI keeps working.
+ state.winner = winnerIds[0] || null;
 }
 
 // ─── Render ──────────────────────────────────────────────────────────────────
@@ -549,11 +639,26 @@ export function render(ctx, state, localPlayerId, w, h) {
  const turnText = (data.turn === "white" ? "White" : "Black") + " to move" + (isMyTurn ? " (your team!)" : "");
  ctx.fillText(turnText, ox + boardSize / 2, oy + boardSize + 35);
 
- // Timer
- const remaining = Math.max(0, Math.ceil((data.phaseDeadline - state.timestamp) / 1000));
- ctx.fillStyle = remaining <= 5 ? "#e83e3e" : "#888";
+ // Vote timer (per turn)
+ const remainingMs = Math.max(0, data.phaseDeadline - state.timestamp);
+ const remainingSec = Math.ceil(remainingMs / 1000);
+
+ // Total match clock (if configured)
+ let matchText = "";
+ if (data.matchDurationMs !== null && data.matchDurationMs !== undefined) {
+ const matchLeftMs = Math.max(0, data.matchDurationMs - state.timestamp);
+ const mm = Math.floor(matchLeftMs / 60000);
+ const ss = Math.floor((matchLeftMs % 60000) / 1000);
+ matchText = "  Match: " + mm + ":" + String(ss).padStart(2, "0");
+ }
+
+ ctx.textAlign = "center";
  ctx.font = "bold 14px monospace";
- ctx.fillText(remaining + "s", ox + boardSize / 2, oy + boardSize + 55);
+ // Red when the active timer is running low: <5s on the vote clock,
+ // or under a minute left in the whole match.
+ const matchLow = data.matchDurationMs != null && (data.matchDurationMs - state.timestamp) <= 60000;
+ ctx.fillStyle = (remainingSec <= 5 || matchLow) ? "#e83e3e" : "#888";
+ ctx.fillText("Vote: " + remainingSec + "s" + matchText, ox + boardSize / 2, oy + boardSize + 55);
 }
 
 function drawPiece(ctx, piece, x, y, size) {
@@ -594,18 +699,19 @@ export function getWinner(state) {
  return state.winner || null;
 }
 
-export function compileReplay(inputs, seed, duration, winner, winnerName, players) {
+export function compileReplay(inputs, seed, duration, winner, winnerName, players, settings) {
  // The CLIENT (app.js saveLocalReplay) auto-assigns a "Match N" title
  // using a localStorage counter and stores the replay locally. We just
  // pass through the inputs/players; the title field is filled in by
  // the client. The server is not involved in saving anymore.
  return {
- gameModule: "chess-royale",
+ gameModule: "team-chess",
  seed,
  duration,
  winner,
  winnerName,
  players,
+ settings: settings || null,
  inputs: inputs || {},
  createdAt: Date.now(),
  replayId: "rpl_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8),
@@ -665,7 +771,7 @@ export function loadReplay(replay) {
  }
  }
 
- let s = createGameState(replay.seed, players);
+ let s = createGameState(replay.seed, players, replay.settings || {});
  const states = [snapshotState(s)];
  const maxTicks = (metadata && metadata.maxTicks) ? metadata.maxTicks : 3600;
  let tk = 0;

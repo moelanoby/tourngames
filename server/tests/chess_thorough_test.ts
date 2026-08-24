@@ -17,7 +17,7 @@ import {
  isMatchOver,
  getWinner,
  handleClick,
-} from "../../games/chess-royale/mod.js";
+} from "../../games/team-chess/mod.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

@@ -50,6 +50,8 @@ function cacheDom() {
   dom.createType = document.getElementById("create-type");
   dom.createMin = document.getElementById("create-min");
   dom.createMax = document.getElementById("create-max");
+  dom.createVotingTime = document.getElementById("create-voting-time");
+  dom.createMatchTime = document.getElementById("create-match-time");
 
   dom.detail = document.getElementById("lobby-detail");
   dom.detailName = document.getElementById("detail-name");
@@ -155,6 +157,7 @@ export function renderLobbyList(list) {
           </div>
           <div class="text-sm text-muted font-mono">
             ${esc(lobby.hostName || "Host")} · ${esc(lobby.game)} · ${playerCount}/${lobby.maxPlayers || 10} players
+            · vote ${lobby.votingTimeSec ?? 20}s${lobby.matchTimeMin ? ` · match ${lobby.matchTimeMin}min` : " · no time limit"}
           </div>
         </div>
         <div class="text-right">
@@ -181,10 +184,15 @@ async function handleCreate() {
   }
 
   const name = dom.createName?.value?.trim() || "Untitled Lobby";
-  const game = dom.createGame?.value || "chess-royale";
+  const game = dom.createGame?.value || "team-chess";
   const type = dom.createType?.value || "open";
   const minPlayers = Math.max(2, parseInt(dom.createMin?.value, 10) || 2);
   const maxPlayers = Math.max(minPlayers, parseInt(dom.createMax?.value, 10) || 10);
+
+  // Timer settings: vote time per turn + total match time (0 = unlimited).
+  const votingTimeSec = Math.min(120, Math.max(5, parseInt(dom.createVotingTime?.value, 10) || 20));
+  const matchTimeRaw = parseInt(dom.createMatchTime?.value, 10);
+  const matchTimeMin = Number.isFinite(matchTimeRaw) && matchTimeRaw > 0 ? Math.min(180, matchTimeRaw) : 0;
 
   try {
     const lobby = await fbCreateLobby({
@@ -193,6 +201,8 @@ async function handleCreate() {
       type,
       minPlayers,
       maxPlayers,
+      votingTimeSec,
+      matchTimeMin,
       hostName: user.displayName || user.email?.split("@")[0] || "Host",
     });
     showToast("Lobby created!", "success");
@@ -237,7 +247,9 @@ function renderDetail(lobby) {
   if (dom.detailName) dom.detailName.textContent = lobby.name;
   if (dom.detailMeta) {
     dom.detailMeta.textContent =
-      `${esc(lobby.game)} · ${lobby.type} · ${lobby.players?.length || 0}/${lobby.maxPlayers || 10} players`;
+      `${esc(lobby.game)} · ${lobby.type} · ${lobby.players?.length || 0}/${lobby.maxPlayers || 10} players` +
+      ` · vote ${lobby.votingTimeSec ?? 20}s/turn` +
+      ` · ${lobby.matchTimeMin ? `match ${lobby.matchTimeMin}min` : "no match time limit"}`;
   }
 
   // Players

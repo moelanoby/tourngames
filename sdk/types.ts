@@ -73,7 +73,7 @@ export interface GameState {
  * seed and the timestamped inputs to reconstruct the entire match.
  */
 export interface ReplayData {
- gameModule: string; // e.g. "chess-royale"
+ gameModule: string; // e.g. "team-chess"
  seed: number;
  duration: number; // Match duration in milliseconds
  winner: PlayerID;

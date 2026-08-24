@@ -11,7 +11,7 @@
  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
  <link rel="stylesheet" href="styles.css">
- <link rel="modulepreload" href="games/chess-royale/mod.js">
+ <link rel="modulepreload" href="games/team-chess/mod.js">
 </head>
 <body>
 
@@ -211,7 +211,7 @@
  <div class="form-group">
  <label class="form-label">Game</label>
  <select id="create-game" class="select">
- <option value="chess-royale">Chess Royale</option>
+ <option value="team-chess">Team Chess</option>
  </select>
  </div>
  </div>
@@ -233,6 +233,18 @@
  <label class="form-label">Max players</label>
  <input type="number" id="create-max" min="2" max="20" value="10" class="input">
  </div>
+ </div>
+ </div>
+ <div class="form-row mb-4">
+ <div class="form-group">
+ <label class="form-label">Vote time per turn (seconds)</label>
+ <input type="number" id="create-voting-time" min="5" max="120" value="20" class="input">
+ <p class="text-xs text-muted mt-1">How long each team has to vote on a move.</p>
+ </div>
+ <div class="form-group">
+ <label class="form-label">Match time (minutes)</label>
+ <input type="number" id="create-match-time" min="0" max="180" value="10" class="input">
+ <p class="text-xs text-muted mt-1">Total game time. 0 = unlimited. On timeout, most material wins.</p>
  </div>
  </div>
  <div class="flex gap-2">

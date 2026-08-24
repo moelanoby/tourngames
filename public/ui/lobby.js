@@ -4,7 +4,7 @@
  * Exported functions for updating the lobby screen DOM.
  */
 
-export function renderLobby(players, hostId, localPlayerId, gameName = "Chess Royale") {
+export function renderLobby(players, hostId, localPlayerId, gameName = "Team Chess") {
  const container = document.getElementById("player-list");
  if (!container) return;
 

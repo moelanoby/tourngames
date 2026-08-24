@@ -127,6 +127,7 @@ const state = {
  players: [],
  seed: null,
  gameId: null,
+ gameSettings: null, // { votingTimeSec, matchTimeMin } chosen at lobby creation
  isHost: false,
  matchStartTime: null,
  signalingSocket: null,
@@ -787,7 +788,7 @@ class GameManager {
 
  this.state = this.module.createGameState(state.seed, state.players.map(p => ({
  id: p.id, name: p.name, color: p.color || PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)],
- })));
+ })), state.gameSettings || {});
  this.matchStartTime = Date.now();
  this.tick = 0;
  this.recordedInputs = {};
@@ -891,6 +892,7 @@ class GameManager {
  winnerId,
  winnerName,
  state.players,
+ state.gameSettings,
  );
 
  // v0.4: replays are stored in the player's browser via localStorage.
@@ -1452,6 +1454,8 @@ function handleGameStart(msg) {
  state.players = msg.players;
  state.hostId = msg.hostId;
  state.gameId = msg.gameId || msg.gameModule;
+ // Host-configured timers (vote time per turn + total match time)
+ state.gameSettings = msg.settings || null;
  state.iceConfig = msg.iceConfig || ICE_CONFIG_DEFAULT;
  state.players.forEach((p, i) => { p.color = PLAYER_COLORS[i % PLAYER_COLORS.length]; });
  state.isHost = (state.playerId === state.hostId);
@@ -1841,7 +1845,7 @@ async function initArchive() {
  escapeHTML(replay.replayId) + "' data-current-title='" + escapeHTML(title) +
  "'>Rename</button>" +
  "<span class='text-xs text-gold font-mono bg-surface px-2 py-1 rounded'>" +
- escapeHTML(replay.gameModule || "chess-royale") + "</span>" +
+ escapeHTML(replay.gameModule || "team-chess") + "</span>" +
  "</div></div>";
  // Click anywhere on the card launches the replay, EXCEPT on the
  // Rename button (so users can click rename without launching playback).
@@ -1896,10 +1900,13 @@ async function playReplay(replay) {
  : "Match";
  dom.replayTitle.textContent = matchTitle + " · " + (replay.winnerName || "Unknown") + " won";
 
- const gameModulePath = "./games/" + (replay.gameModule || "chess-royale") + "/mod.js";
+ // Legacy replays saved before the rename still point at "chess-royale";
+ // map them onto the renamed team-chess module so they keep playing.
+ const moduleId = replay.gameModule === "chess-royale" ? "team-chess" : (replay.gameModule || "team-chess");
+ const gameModulePath = "./games/" + moduleId + "/mod.js";
  let mod;
  try {
- if (gameMgr.module && gameMgr.module.metadata?.id === replay.gameModule) {
+ if (gameMgr.module && gameMgr.module.metadata?.id === moduleId) {
  mod = gameMgr.module;
  } else {
  const imported = await import("./" + gameModulePath);
@@ -2091,7 +2098,7 @@ async function main() {
  gameConfig = await configRes.json();
  } catch (e) {
  console.error("Failed to load game config:", e);
- gameConfig = { gameId: "chess-royale", gameModulePath: "./games/chess-royale/mod.js", gameName: "Chess Royale", maxPlayers: 20 };
+ gameConfig = { gameId: "team-chess", gameModulePath: "./games/team-chess/mod.js", gameName: "Team Chess", maxPlayers: 20 };
  }
 
  setLoadingText("loading game module...");
@@ -2156,7 +2163,7 @@ async function main() {
     try {
       const lobby = await fb.createLobby({
         name: lobbyName,
-        game: state.gameConfig?.gameId || "chess-royale",
+        game: state.gameConfig?.gameId || "team-chess",
         type: "open",
         maxPlayers: 10,
         minPlayers: 2,

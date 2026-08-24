@@ -22,7 +22,7 @@ import {
  isMatchOver,
  getWinner,
  metadata,
-} from "../../games/chess-royale/mod.js";
+} from "../../games/team-chess/mod.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

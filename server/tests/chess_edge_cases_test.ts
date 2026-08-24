@@ -15,7 +15,7 @@ import {
  isLegalMove,
  getLegalMoves,
  updateGameState,
-} from "../../games/chess-royale/mod.js";
+} from "../../games/team-chess/mod.js";
 
 function randomPlayers(n: number) {
  return Array.from({ length: n }, (_, i) => ({

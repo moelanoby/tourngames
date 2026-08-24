@@ -37,6 +37,10 @@ export interface Lobby {
  type: LobbyType;
  maxPlayers: number;
  minPlayers: number;
+ /** Vote time per turn in seconds (5-120). */
+ votingTimeSec?: number;
+ /** Total match time in minutes (1-180, 0 = unlimited). */
+ matchTimeMin?: number;
  inviteCode: string | null;
  signups: SignupEntry[];
  startedAt: number | null;

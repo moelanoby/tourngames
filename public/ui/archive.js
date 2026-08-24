@@ -83,13 +83,14 @@ export function renderReplayList(replays) {
  </div>
  <div class="text-right">
  <span class="text-xs text-esports-accent font-mono bg-esports-surface px-2 py-1 rounded">
- ${replay.gameModule || "chess-royale"}
+ ${replay.gameModule || "team-chess"}
  </span>
  </div>
  </div>
  `;
  div.addEventListener("click", () => {
- playReplay(replay, `/games/${replay.gameModule || "chess-royale"}/mod.js`);
+ const moduleId = replay.gameModule === "chess-royale" ? "team-chess" : (replay.gameModule || "team-chess");
+ playReplay(replay, `/games/${moduleId}/mod.js`);
  });
  container.appendChild(div);
  });

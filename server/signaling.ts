@@ -169,7 +169,7 @@ export async function handleWebSocketMessage(
  if (info?.lobbyId) await leaveLobby(playerId);
 
  const lobbyName = sanitizeLobbyName(msg.name) || "Untitled Lobby";
- const gameId = sanitizeString(msg.gameId, 50) || "chess-royale";
+ const gameId = sanitizeString(msg.gameId, 50) || "team-chess";
  const hostName = sanitizeString(msg.hostName, 16) || ctx.username || "Host";
  const lobbyType = ["open", "signup", "private"].includes(msg.lobbyType) ? msg.lobbyType : "open";
  const parsedMax = parseInt(msg.maxPlayers, 10);
@@ -272,7 +272,7 @@ export async function handleWebSocketMessage(
  case "join": {
  if (info?.lobbyId) await leaveLobby(playerId);
 
- const gameId = sanitizeString(msg.gameId, 50) || "chess-royale";
+ const gameId = sanitizeString(msg.gameId, 50) || "team-chess";
  const playerName = sanitizeString(msg.playerName, 16) || ctx.username || "Player";
  const player: PlayerSession = {
  id: playerId,
@@ -355,6 +355,11 @@ export async function handleWebSocketMessage(
  players: lobby.players,
  hostId: lobby.hostId,
  gameModule: lobby.gameId,
+ // Host-configured timers chosen at lobby creation.
+ settings: {
+ votingTimeSec: lobby.votingTimeSec ?? 20,
+ matchTimeMin: lobby.matchTimeMin ?? 10,
+ },
  iceConfig: ICE_CONFIG,
  });
  await broadcastLobbyList();
@@ -508,7 +513,7 @@ function lobbySummary(lobby: Lobby) {
  return {
  id: lobby.id,
  name: lobby.name || "Untitled Lobby",
- gameId: lobby.gameId || "chess-royale",
+ gameId: lobby.gameId || "team-chess",
  type: lobby.type || "open",
  status: lobby.status || "waiting",
  playerCount: players.length,

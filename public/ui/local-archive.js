@@ -14,7 +14,7 @@
  *   localStorage["tgn_replay_counter"] number for the next "Match N" title
  *
  * We cap the stored array at LOCAL_REPLAYS_MAX to stay safely under the
- * 5 MB localStorage per-origin limit (each chess-royale replay is ~1-5 KB).
+ * 5 MB localStorage per-origin limit (each team-chess replay is ~1-5 KB).
  */
 
 // Allow tests to inject a mock storage. In the browser, `localStorage` is

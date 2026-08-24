@@ -9,7 +9,7 @@
  */
 
 import { assertEquals, assert } from "jsr:@std/assert@1.0.0";
-import { createGameState, isLegalMove, getLegalMoves } from "../../games/chess-royale/mod.js";
+import { createGameState, isLegalMove, getLegalMoves } from "../../games/team-chess/mod.js";
 
 // ─── Helper: generate a random board position ───────────────────────────────
 

@@ -38,17 +38,26 @@ export async function createLobby(opts: {
  type?: LobbyType;
  maxPlayers?: number;
  minPlayers?: number;
+ votingTimeSec?: number;
+ matchTimeMin?: number;
 }): Promise<Lobby> {
  const lobbyId = generateId();
  // Defensive: ensure all string fields are actually strings
  const safeName = typeof opts.name === "string" ? opts.name.trim().slice(0, 60) : "Untitled Lobby";
- const safeGameId = typeof opts.gameId === "string" ? opts.gameId : "chess-royale";
+ const safeGameId = typeof opts.gameId === "string" ? opts.gameId : "team-chess";
  const safeHostName = typeof opts.hostName === "string" ? opts.hostName.slice(0, 16) : "Host";
  const safeType: LobbyType = ["open", "signup", "private"].includes(opts.type as string) ? opts.type as LobbyType : "open";
  const safeMax = typeof opts.maxPlayers === "number" && !isNaN(opts.maxPlayers)
  ? Math.min(20, Math.max(2, Math.floor(opts.maxPlayers))) : 10;
  const safeMin = typeof opts.minPlayers === "number" && !isNaN(opts.minPlayers)
  ? Math.min(10, Math.max(2, Math.floor(opts.minPlayers))) : 2;
+ // Game timers: vote time per turn + total match time (0 = unlimited).
+ const safeVotingSec = typeof opts.votingTimeSec === "number" && !isNaN(opts.votingTimeSec)
+ ? Math.min(120, Math.max(5, Math.round(opts.votingTimeSec))) : 20;
+ const safeMatchMinRaw = typeof opts.matchTimeMin === "number" && !isNaN(opts.matchTimeMin)
+ ? Math.round(opts.matchTimeMin) : 10;
+ const safeMatchMin = safeMatchMinRaw > 0
+ ? Math.min(180, Math.max(1, safeMatchMinRaw)) : 0;
 
  const lobby: Lobby = {
  id: lobbyId,
@@ -65,6 +74,8 @@ export async function createLobby(opts: {
  type: safeType,
  maxPlayers: safeMax,
  minPlayers: safeMin,
+ votingTimeSec: safeVotingSec,
+ matchTimeMin: safeMatchMin,
  inviteCode: safeType === "private" ? generateInviteCode() : null,
  signups: [],
  startedAt: null,
